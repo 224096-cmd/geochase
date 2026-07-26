@@ -1,6 +1,20 @@
 import { useEffect, useRef } from "react";
 import L from "leaflet";
 
+import "leaflet/dist/leaflet.css";
+
+import markerIcon from "leaflet/dist/images/marker-icon.png";
+import markerShadow from "leaflet/dist/images/marker-shadow.png";
+
+delete (L.Icon.Default.prototype as any)._getIconUrl;
+
+
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: markerIcon,
+  iconUrl: markerIcon,
+  shadowUrl: markerShadow,
+});
+
 interface Props {
   onPick: (lat: number, lng: number) => void;
   markerPosition?: { lat: number; lng: number } | null;
