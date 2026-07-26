@@ -1,16 +1,14 @@
 import { useEffect, useRef } from "react";
 import L from "leaflet";
-
-import "leaflet/dist/leaflet.css";
-
+import markerIcon2x from "leaflet/dist/images/marker-icon-2x.png";
 import markerIcon from "leaflet/dist/images/marker-icon.png";
 import markerShadow from "leaflet/dist/images/marker-shadow.png";
 
-delete (L.Icon.Default.prototype as any)._getIconUrl;
-
-
+// ViteでLeafletを使うと既定のマーカー画像パスが解決できず
+// 「ピンが見えない/押しても反応が無いように見える」原因になるため、
+// 明示的にインポートしたURLで上書きする。
 L.Icon.Default.mergeOptions({
-  iconRetinaUrl: markerIcon,
+  iconRetinaUrl: markerIcon2x,
   iconUrl: markerIcon,
   shadowUrl: markerShadow,
 });
@@ -20,8 +18,10 @@ interface Props {
   markerPosition?: { lat: number; lng: number } | null;
 }
 
-// AI逃走モードでは正解座標をクライアントに送らないため、
-// このコンポーネントは「プレイヤーが立てたピン」だけを扱う。
+// 航空写真(Esri World Imagery、無料・APIキー不要。個人/小規模利用向け)
+const SATELLITE_TILE_URL =
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
+
 export default function MapView({ onPick, markerPosition }: Props) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<L.Map | null>(null);
@@ -30,14 +30,15 @@ export default function MapView({ onPick, markerPosition }: Props) {
   useEffect(() => {
     if (!mapRef.current || mapInstance.current) return;
 
-    const map = L.map(mapRef.current).setView([35.681, 139.767], 5);
-    L.tileLayer(
-     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-     {
-       attribution:
-          "Tiles &copy; Esri"
-     }
-     ).addTo(map);
+    const map = L.map(mapRef.current, {
+      // ダブルタップでのズームとピン設置が競合しないよう調整
+      doubleClickZoom: false,
+    }).setView([35.681, 139.767], 4);
+
+    L.tileLayer(SATELLITE_TILE_URL, {
+      attribution: "Tiles &copy; Esri",
+      maxZoom: 19,
+    }).addTo(map);
 
     map.on("click", (e: L.LeafletMouseEvent) => {
       onPick(e.latlng.lat, e.latlng.lng);
@@ -49,7 +50,14 @@ export default function MapView({ onPick, markerPosition }: Props) {
     });
 
     mapInstance.current = map;
+
+    // コンテナサイズがレイアウト確定後に変わるケース(PWA/フレックスレイアウト)に対応
+    const resizeObserver = new ResizeObserver(() => map.invalidateSize());
+    resizeObserver.observe(mapRef.current);
+    setTimeout(() => map.invalidateSize(), 100);
+
     return () => {
+      resizeObserver.disconnect();
       map.remove();
       mapInstance.current = null;
     };
@@ -65,5 +73,5 @@ export default function MapView({ onPick, markerPosition }: Props) {
     }
   }, [markerPosition]);
 
-  return <div ref={mapRef} style={{ width: "100%", height: "100%", borderRadius: 12 }} />;
+  return <div ref={mapRef} style={{ width: "100%", height: "100%" }} />;
 }
