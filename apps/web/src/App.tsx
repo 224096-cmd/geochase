@@ -11,6 +11,7 @@ interface ChaseState {
   round: number;
   maxRounds: number;
   imageUrl: string;
+  imageId: string;
   hint: string;
   revealedHints: string[];
   status: "idle" | "running" | "finished";
@@ -77,7 +78,7 @@ export default function App() {
       )}
 
       <div style={{ flex: "1 1 50%", minHeight: 200 }}>
-        <StreetView imageUrl={state?.imageUrl ?? ""} />
+        <StreetView imageId={state?.imageId ?? ""} />
       </div>
       <div style={{ flex: "1 1 40%", minHeight: 200 }}>
         <MapView onPick={(lat, lng) => setGuessPin({ lat, lng })} markerPosition={guessPin} />

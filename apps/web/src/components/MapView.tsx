@@ -31,9 +31,13 @@ export default function MapView({ onPick, markerPosition }: Props) {
     if (!mapRef.current || mapInstance.current) return;
 
     const map = L.map(mapRef.current).setView([35.681, 139.767], 5);
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: "&copy; OpenStreetMap contributors",
-    }).addTo(map);
+    L.tileLayer(
+     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+     {
+       attribution:
+          "Tiles &copy; Esri"
+     }
+     ).addTo(map);
 
     map.on("click", (e: L.LeafletMouseEvent) => {
       onPick(e.latlng.lat, e.latlng.lng);
