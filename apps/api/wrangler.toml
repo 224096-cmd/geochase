@@ -17,12 +17,12 @@ new_sqlite_classes = ["GameRoom"]
 [[d1_databases]]
 binding = "DB"
 database_name = "geochase-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "6c195eb5-8d6b-4702-b951-977ffe751ef8"
 
 # --- KV: セッション/キャッシュ ---
 [[kv_namespaces]]
 binding = "SESSIONS"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "390f220348f446fd9bee7bd6e5734864"
 
 # --- CORS用に許可するフロントエンドのオリジンを環境変数化 ---
 [vars]
