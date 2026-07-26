@@ -1,0 +1,31 @@
+name = "geochase-api"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# --- Durable Object: 1ゲームルーム = 1インスタンス ---
+[[durable_objects.bindings]]
+name = "GAME_ROOM"
+class_name = "GameRoom"
+
+# SQLiteバックエンドを指定することでWorkers Freeプランでも利用可能
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GameRoom"]
+
+# --- D1: ユーザー・スコア永続化 ---
+[[d1_databases]]
+binding = "DB"
+database_name = "geochase-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# --- KV: セッション/キャッシュ ---
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+# --- CORS用に許可するフロントエンドのオリジンを環境変数化 ---
+[vars]
+ALLOWED_ORIGIN = "http://localhost:5173"
+# 本番デプロイ後、Cloudflare Pagesの発行URLに書き換えるか
+# ダッシュボードの環境変数で上書きしてください
