@@ -11,28 +11,83 @@ const OSRM_URL = "https://router.project-osrm.org"; // 無料の公開デモサ�
  */
 export async function fetchRandomStreetPoint(
   token: string,
-  center: LatLng,
-  bboxDegrees = 0.02
+  center: LatLng
 ): Promise<{ point: LatLng; imageUrl: string; imageId: string } | null> {
-  const bbox = [
-    center.lng - bboxDegrees,
-    center.lat - bboxDegrees,
-    center.lng + bboxDegrees,
-    center.lat + bboxDegrees,
-  ].join(",");
 
-  const url = `${MAPILLARY_GRAPH_URL}?access_token=${token}&fields=id,geometry,thumb_2048_url&bbox=${bbox}&limit=50`;
-  const res = await fetch(url);
-  if (!res.ok) return null;
+  // 検索範囲を徐々に拡大
+  const ranges = [
+    0.02,
+    0.05,
+    0.1,
+    0.5
+  ];
 
-  const data = (await res.json()) as {
-    data: { id: string; geometry: { coordinates: [number, number] }; thumb_2048_url: string }[];
-  };
-  if (!data.data || data.data.length === 0) return null;
+  for (const bboxDegrees of ranges) {
 
-  const pick = data.data[Math.floor(Math.random() * data.data.length)];
-  const [lng, lat] = pick.geometry.coordinates;
-  return { point: { lat, lng }, imageUrl: pick.thumb_2048_url, imageId: pick.id };
+    const bbox = [
+      center.lng - bboxDegrees,
+      center.lat - bboxDegrees,
+      center.lng + bboxDegrees,
+      center.lat + bboxDegrees,
+    ].join(",");
+
+
+    const url =
+      `${MAPILLARY_GRAPH_URL}?` +
+      `access_token=${token}` +
+      `&fields=id,geometry,thumb_2048_url` +
+      `&bbox=${bbox}` +
+      `&limit=50`;
+
+
+    const res = await fetch(url);
+
+
+    if (!res.ok) {
+      continue;
+    }
+
+
+    const data = await res.json() as {
+      data: {
+        id:string;
+        geometry:{
+          coordinates:[number,number]
+        };
+        thumb_2048_url:string;
+      }[];
+    };
+
+
+    if (!data.data || data.data.length === 0) {
+      continue;
+    }
+
+
+    const pick =
+      data.data[
+        Math.floor(Math.random()*data.data.length)
+      ];
+
+
+    const [lng,lat] =
+      pick.geometry.coordinates;
+
+
+    return {
+      point:{
+        lat,
+        lng
+      },
+      imageUrl:
+        pick.thumb_2048_url,
+      imageId:
+        pick.id
+    };
+  }
+
+
+  return null;
 }
 
 /**

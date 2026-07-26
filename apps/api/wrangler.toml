@@ -24,8 +24,8 @@ database_id = "6c195eb5-8d6b-4702-b951-977ffe751ef8"
 binding = "SESSIONS"
 id = "390f220348f446fd9bee7bd6e5734864"
 
-# --- CORS用に許可するフロントエンドのオリジンを環境変数化 ---
+# --- CORS用に許可するフロントエンドのオリジン ---
 [vars]
-ALLOWED_ORIGIN = "http://localhost:5173"
+ALLOWED_ORIGIN = "https://geochase.pages.dev,http://localhost:5173"
 # 本番デプロイ後、Cloudflare Pagesの発行URLに書き換えるか
 # ダッシュボードの環境変数で上書きしてください

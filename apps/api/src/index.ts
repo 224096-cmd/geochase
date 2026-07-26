@@ -1,9 +1,19 @@
 import type { Env } from "./types";
 export { GameRoom } from "./GameRoom";
 
-function corsHeaders(origin: string) {
+function corsHeaders(origin: string | null, allowedOrigins: string) {
+
+  const allowed = allowedOrigins
+    .split(",")
+    .map(v => v.trim());
+
+  const allowOrigin =
+    origin && allowed.includes(origin)
+      ? origin
+      : allowed[0];
+
   return {
-    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
   };
@@ -12,7 +22,10 @@ function corsHeaders(origin: string) {
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
-    const headers = corsHeaders(env.ALLOWED_ORIGIN);
+    const origin = req.headers.get("Origin");
+
+    const headers =
+     corsHeaders(origin, env.ALLOWED_ORIGIN);
 
     if (req.method === "OPTIONS") {
       return new Response(null, { headers });
