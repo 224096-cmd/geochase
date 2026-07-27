@@ -53,6 +53,23 @@ function resolveRoomId(): string {
   return created;
 }
 
+/**
+ * 900px以上（映像と地図を左右に並べる幅）かどうか。
+ * 小窓かどうかの判定に使う。PCでは両方フル表示なので、
+ * どちらを選んでいても操作ボタンを隠してはいけない。
+ */
+function useIsWide(): boolean {
+  const [wide, setWide] = useState(() => window.matchMedia("(min-width: 900px)").matches);
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 900px)");
+    const onChange = (e: MediaQueryListEvent) => setWide(e.matches);
+    mq.addEventListener("change", onChange);
+    setWide(mq.matches);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return wide;
+}
+
 function loadSettings(): StartOptions {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -63,6 +80,7 @@ function loadSettings(): StartOptions {
 }
 
 export default function App() {
+  const isWide = useIsWide();
   const [roomId] = useState(resolveRoomId);
   const [settings, setSettings] = useState<StartOptions>(loadSettings);
   const [panel, setPanel] = useState<PanelKey>(null);
@@ -290,8 +308,9 @@ export default function App() {
       : { imageId: state?.imageId ?? "", imageUrl: state?.imageUrl ?? "" };
 
   const urgency = countdown ? (countdown.ratio < 0.15 ? "critical" : countdown.ratio < 0.4 ? "warn" : "calm") : "calm";
-  const streetCompact = focusedPane !== "street";
-  const mapCompact = focusedPane !== "map";
+  // 横に並べられる幅なら、どちらも主画面なので小窓扱いにしない
+  const streetCompact = !isWide && focusedPane !== "street";
+  const mapCompact = !isWide && focusedPane !== "map";
 
   /* ---- 設定不備の案内 ---- */
   if (!API_URL) {
@@ -374,7 +393,7 @@ export default function App() {
         <main className="stage" data-focus={focusedPane}>
           <section className="pane pane-street" onClick={() => setFocusedPane("street")} aria-label="ストリート画像">
             {streetCompact ? (
-              <span className="pip-label">映像 ⤢</span>
+              <span className="pip-label">タップで映像を大きく</span>
             ) : (
               explore && (
                 <div className="pane-tabs">
@@ -405,7 +424,7 @@ export default function App() {
           </section>
 
           <section className="pane pane-map" onClick={() => setFocusedPane("map")} aria-label="地図">
-            {mapCompact && <span className="pip-label">地図 ⤢</span>}
+            {mapCompact && <span className="pip-label">タップで地図を大きく</span>}
             <MapView
               onPick={(lat, lng) => setGuessPin({ lat, lng })}
               markerPosition={guessPin}

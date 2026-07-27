@@ -78,12 +78,16 @@ export default function MapView({
     if (!containerRef.current || mapRef.current) return;
 
     const map = L.map(containerRef.current, {
-      doubleClickZoom: false,
+      // ダブルタップで拡大できた方が片手操作しやすい
+      doubleClickZoom: true,
       zoomControl: false,
       worldCopyJump: true,
       minZoom: 2,
       maxZoom: 18,
-      tapTolerance: 20,
+      tapTolerance: 24,
+      wheelPxPerZoomLevel: 90,
+      zoomSnap: 0.5,
+      zoomDelta: 0.5,
     }).setView([35.681, 139.767], 4);
 
     L.control.zoom({ position: "topright" }).addTo(map);
@@ -152,9 +156,20 @@ export default function MapView({
       return;
     }
     const latlng = L.latLng(markerPosition.lat, markerPosition.lng);
-    if (guessMarker.current) guessMarker.current.setLatLng(latlng);
-    else guessMarker.current = L.marker(latlng, { icon: guessPinIcon, keyboard: false }).addTo(map);
-  }, [markerPosition]);
+    if (guessMarker.current) {
+      guessMarker.current.setLatLng(latlng);
+    } else {
+      // タップだけだと数十m単位でしか置けないので、ドラッグで微調整できるようにする
+      const marker = L.marker(latlng, { icon: guessPinIcon, keyboard: false, draggable: true, autoPan: true })
+        .addTo(map);
+      marker.on("dragend", () => {
+        const p = marker.getLatLng();
+        if (!lockedRef.current) onPickRef.current(p.lat, p.lng);
+      });
+      guessMarker.current = marker;
+    }
+    guessMarker.current.dragging?.[locked ? "disable" : "enable"]();
+  }, [markerPosition, locked]);
 
   /* --- 正解ピンと結果ライン --- */
   useEffect(() => {
@@ -250,6 +265,18 @@ export default function MapView({
         >
           全体
         </button>
+        {markerPosition && (
+          <button
+            type="button"
+            className="map-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              mapRef.current?.setView(L.latLng(markerPosition.lat, markerPosition.lng), 15);
+            }}
+          >
+            ピンへ
+          </button>
+        )}
         {onExplore && (
           <button
             type="button"

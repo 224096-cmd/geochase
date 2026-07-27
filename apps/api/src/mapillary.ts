@@ -123,17 +123,22 @@ interface RawImage {
   id: string;
   geometry: { coordinates: [number, number] };
   computed_geometry?: { coordinates: [number, number] };
+  thumb_original_url?: string;
   thumb_2048_url?: string;
   thumb_1024_url?: string;
   is_pano?: boolean;
   captured_at?: number;
+  width?: number;
+  height?: number;
+  quality_score?: number;
 }
 
 function toSpot(img: RawImage): StreetSpot {
   const [lng, lat] = img.computed_geometry?.coordinates ?? img.geometry.coordinates;
   return {
     point: { lat, lng },
-    imageUrl: img.thumb_2048_url ?? img.thumb_1024_url ?? "",
+    // 静止画フォールバック用。看板が読めるよう可能な限り原寸に近いものを選ぶ
+    imageUrl: img.thumb_original_url ?? img.thumb_2048_url ?? img.thumb_1024_url ?? "",
     imageId: img.id,
     isPano: Boolean(img.is_pano),
   };
@@ -144,7 +149,8 @@ async function searchOnce(token: string, center: LatLng, bboxDegrees: number, li
     console.error("MAPILLARY_TOKEN is not configured");
     return [];
   }
-  const fields = "id,geometry,computed_geometry,thumb_2048_url,thumb_1024_url,is_pano,captured_at";
+  const fields =
+    "id,geometry,computed_geometry,thumb_original_url,thumb_2048_url,thumb_1024_url,is_pano,captured_at,width,height,quality_score";
   const bbox = buildBbox(center, bboxDegrees);
   const url = `${MAPILLARY_GRAPH_URL}?access_token=${encodeURIComponent(token)}&fields=${fields}&bbox=${bbox}&limit=${limit}`;
   const res = await fetchWithTimeout(url);
@@ -163,14 +169,22 @@ async function searchOnce(token: string, center: LatLng, bboxDegrees: number, li
 }
 
 /**
- * 360度パノラマを優先して並べ替える。
- * 平面写真だと視点を回せずゲーム性が落ちるため、パノラマがあれば必ず先に使う。
+ * 「遊べる画像」を上位に並べ替える。
+ *  1. 360度パノラマ（視点を回せないと推理にならない）
+ *  2. Mapillaryの品質スコアが高いもの
+ *  3. 解像度が高いもの（看板や標識を読めるかどうかを左右する）
+ * 同点のときはランダムなので、同じ場所ばかり出ることはない。
  */
+function scoreImage(img: RawImage): number {
+  const pano = img.is_pano ? 1_000_000 : 0;
+  const quality = Math.max(0, Math.min(1, img.quality_score ?? 0.5)) * 100_000;
+  const pixels = Math.min(1, (img.width ?? 2048) / 8000) * 10_000;
+  return pano + quality + pixels;
+}
+
 function preferPanorama(images: RawImage[]): RawImage[] {
-  const shuffled = shuffle(images);
-  const panos = shuffled.filter((i) => i.is_pano);
-  const flats = shuffled.filter((i) => !i.is_pano);
-  return [...panos, ...flats];
+  // 先にシャッフルしてから安定ソートすることで、同スコア内の順序をランダムにする
+  return shuffle(images).sort((a, b) => scoreImage(b) - scoreImage(a));
 }
 
 /** 検索が完全に失敗した場合の最終フォールバック: 地方内の完全ランダム座標(画像なし) */

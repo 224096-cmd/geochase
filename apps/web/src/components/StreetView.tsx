@@ -25,6 +25,10 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
 
+  /* mapillary-jsは拡大するほど高解像度のタイルを読み込む。
+     看板を読むにはズームが要るので、ピンチだけでなくボタンでも操作できるようにする。 */
+  const zoomRef = useRef(0);
+
   useEffect(() => {
     if (!MAPILLARY_TOKEN || !containerRef.current) return;
 
@@ -33,8 +37,9 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
       return;
     }
 
-    // 前の画像の「表示済み」状態を持ち越さない
+    // 前の画像の「表示済み」状態とズーム倍率を持ち越さない
     setPhase("loading");
+    zoomRef.current = 0;
 
     let cancelled = false;
     const timer = window.setTimeout(() => {
@@ -103,15 +108,43 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
     []
   );
 
-  const resetView = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
+  const applyZoom = useCallback((next: number) => {
+    zoomRef.current = Math.max(0, Math.min(4, next));
     try {
-      viewerRef.current?.setCenter([0.5, 0.5]);
-      viewerRef.current?.setZoom(0);
+      viewerRef.current?.setZoom(zoomRef.current);
     } catch {
       /* 未初期化 */
     }
   }, []);
+
+  const zoomIn = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      applyZoom(zoomRef.current + 0.7);
+    },
+    [applyZoom]
+  );
+
+  const zoomOut = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      applyZoom(zoomRef.current - 0.7);
+    },
+    [applyZoom]
+  );
+
+  const resetView = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      try {
+        viewerRef.current?.setCenter([0.5, 0.5]);
+      } catch {
+        /* 未初期化 */
+      }
+      applyZoom(0);
+    },
+    [applyZoom]
+  );
 
   if (!MAPILLARY_TOKEN) {
     return (
@@ -155,9 +188,17 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
       )}
 
       {phase === "ready" && !compact && (
-        <button type="button" className="street-btn" onClick={resetView}>
-          視点を戻す
-        </button>
+        <div className="street-controls">
+          <button type="button" className="street-btn" onClick={zoomIn} aria-label="拡大">
+            ＋
+          </button>
+          <button type="button" className="street-btn" onClick={zoomOut} aria-label="縮小">
+            −
+          </button>
+          <button type="button" className="street-btn is-wide" onClick={resetView}>
+            戻す
+          </button>
+        </div>
       )}
     </div>
   );

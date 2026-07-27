@@ -30,7 +30,7 @@
 
   --radius: 12px;
   --radius-sm: 8px;
-  --ad-h: 60px;
+ --ad-h: 50px;
   --tap: 44px;
 }
 
@@ -441,20 +441,38 @@ code {
   animation: spin 0.9s linear infinite;
 }
 
-/* 映像側の操作は右上に固める */
-.street-btn {
+/* 映像側の操作は右上に縦積み。看板を読むためのズームを最優先で置く */
+.street-controls {
   position: absolute;
   right: 8px;
   top: 8px;
   z-index: 5;
-  background: rgb(7 12 11 / 85%);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  align-items: flex-end;
+}
+
+.street-btn {
+  background: rgb(7 12 11 / 88%);
   color: var(--text);
   border: 1px solid var(--line);
   border-radius: 999px;
-  padding: 6px 12px;
-  min-height: 32px;
-  font-size: 11px;
+  width: 38px;
+  height: 38px;
+  font-size: 16px;
+  line-height: 1;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.street-btn.is-wide {
+  width: auto;
+  height: 32px;
+  padding: 0 12px;
+  font-size: 11px;
 }
 
 /* ---------- 地図 ---------- */
@@ -714,30 +732,29 @@ code {
    実測したユニットサイズに合わせて置き場所を変える。
    ・スマホ(320x50) → 下部バー。bodyのflex子なので必ず見える
    ・PC 300x250     → 右パネル下に固定。サイドバーに余白を確保して重ならないようにする
-   ・PC 160x600     → 1240px以上のときだけ右端の縦帯。app全体に余白を作って避ける
-   下部バーに300x250や160x600を入れるとゲーム画面を潰すので入れない。 */
+   下部バーに300x250を入れるとゲーム画面を潰すので入れない。 */
 
 .ad-bar {
   flex: 0 0 auto;
+  /* 余白を作らず広告の実寸ぴったりに詰めて、地図の面積を稼ぐ */
   min-height: var(--ad-h);
-  padding-bottom: env(safe-area-inset-bottom);
+  padding: 0 0 env(safe-area-inset-bottom);
   background: var(--ink);
   border-top: 1px solid var(--line-soft);
   display: flex;
   align-items: center;
   justify-content: center;
+  line-height: 0;
 }
 
 #ad-sp {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 50px;
 }
 
-/* PC用は既定で非表示。fixedにするので flow には影響しない */
-#ad-pc-rect,
-#ad-pc-sky {
+/* PCレクタングルは既定で非表示。fixedにするので flow には影響しない */
+#ad-pc-rect {
   display: none;
 }
 
@@ -746,32 +763,41 @@ code {
    ========================================================================== */
 
 @media (max-width: 899px) {
+  /* 小窓を重ねると主画面の操作を邪魔するので、上下に分けて重ならないようにする */
+  .stage {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 6px;
+  }
+
   .stage[data-focus="street"] .pane-street,
   .stage[data-focus="map"] .pane-map {
-    position: absolute;
-    inset: 8px;
-    z-index: 1;
+    flex: 1 1 auto;
+    min-height: 0;
+    order: 0;
   }
 
+  /* 控えの画面は下部の帯。タップで入れ替わる */
   .stage[data-focus="street"] .pane-map,
   .stage[data-focus="map"] .pane-street {
-    position: absolute;
-    right: 14px;
-    bottom: 14px;
-    width: 34%;
-    max-width: 170px;
-    aspect-ratio: 4 / 3;
-    height: auto;
-    z-index: 4;
+    flex: 0 0 88px;
+    order: 1;
     cursor: pointer;
-    box-shadow: 0 6px 20px rgb(0 0 0 / 60%);
   }
 
-  /* 小窓の中身は触らせない（誤タップで地図にピンが立つのを防ぐ） */
+  /* 帯側の中身は触らせない（誤タップで地図にピンが立つのを防ぐ） */
   .stage[data-focus="street"] .pane-map > *,
   .stage[data-focus="map"] .pane-street > * {
     pointer-events: none;
   }
+
+  /* 下の帯を詰めて主画面を広くする */
+  .panel-tabs { padding: 5px 8px; }
+  .panel-tabs button { min-height: 34px; padding: 6px 4px; }
+  .actionbar { padding: 6px 8px; }
+  .actionbar .primary-btn { min-height: 46px; }
+  .readout-cell { padding: 6px 10px 8px; }
 
   /* パネルはタブ帯の真上に開く。タブ帯の高さは変わらないので画面が動かない */
   .app:not([data-panel="none"]) .panel-body {
@@ -846,22 +872,6 @@ code {
   .actionbar .wide { width: auto; min-width: 280px; }
 
   .toast { bottom: calc(var(--ad-h) + 88px); }
-}
-
-/* 横に余裕がある画面だけ、右端にスカイスクレイパーを立てる */
-@media (min-width: 1240px) {
-  .app { padding-right: 176px; }
-
-  #ad-pc-sky {
-    display: block;
-    position: fixed;
-    right: 8px;
-    top: 50%;
-    transform: translateY(-50%);
-    z-index: 90;
-  }
-
-  #ad-pc-rect { right: 186px; }
 }
 
 @media (min-width: 1400px) {
