@@ -1,76 +1,149 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "mapillary-js/dist/mapillary.css";
 
 interface Props {
   imageId: string;
+  /** mapillary-jsが失敗したときに表示する静止画URL */
+  imageUrl?: string;
+  /** 画像が見えるようになったら1回だけ呼ばれる */
   onReady?: () => void;
 }
 
-const MAPILLARY_TOKEN = import.meta.env.VITE_MAPILLARY_TOKEN;
+const MAPILLARY_TOKEN = import.meta.env.VITE_MAPILLARY_TOKEN as string | undefined;
+/** これ以上待っても表示されないなら静止画に切り替える */
+const LOAD_TIMEOUT_MS = 12_000;
 
-export default function StreetView({ imageId, onReady }: Props) {
+type Phase = "empty" | "loading" | "ready" | "fallback" | "failed";
+
+export default function StreetView({ imageId, imageUrl, onReady }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
-  const [ready, setReady] = useState(false);
+  const [phase, setPhase] = useState<Phase>("empty");
+
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
 
   useEffect(() => {
-    if (!containerRef.current || !imageId || !MAPILLARY_TOKEN) return;
+    if (!MAPILLARY_TOKEN) return;
+    if (!containerRef.current) return;
+
+    if (!imageId) {
+      setPhase("empty");
+      return;
+    }
+
+    // 前の画像の「表示済み」状態を持ち越さない（旧実装ではローディング表示が二度と出なかった）
+    setPhase("loading");
+
     let cancelled = false;
+    const timer = window.setTimeout(() => {
+      if (cancelled) return;
+      // 表示できなくてもゲーム進行を止めないよう、静止画に切り替えて先へ進める
+      setPhase(imageUrl ? "fallback" : "failed");
+      onReadyRef.current?.();
+    }, LOAD_TIMEOUT_MS);
 
-    import("mapillary-js").then(({ Viewer }) => {
-      if (cancelled || !containerRef.current) return;
+    const settle = (next: Phase) => {
+      if (cancelled) return;
+      window.clearTimeout(timer);
+      setPhase(next);
+      onReadyRef.current?.();
+    };
 
-      if (!viewerRef.current) {
-        try {
-          const viewer = new Viewer({
+    import("mapillary-js")
+      .then(({ Viewer }) => {
+        if (cancelled || !containerRef.current) return;
+
+        if (!viewerRef.current) {
+          viewerRef.current = new Viewer({
             accessToken: MAPILLARY_TOKEN,
             container: containerRef.current,
-            imageId,
+            // ここでimageIdを渡すと失敗を捕捉できないので、必ずmoveToで移動する
             component: { cover: false },
           });
-          viewer.on("image", () => {
-            setReady(true);
-            onReady?.();
-          });
-          viewerRef.current = viewer;
-        } catch (err) {
-          console.error("Mapillary viewer init failed", err);
         }
-      } else {
-        viewerRef.current
+
+        return viewerRef.current
           .moveTo(imageId)
-          .then(() => {
-            setReady(true);
-            onReady?.();
-          })
-          .catch((err: unknown) => console.error("moveTo failed", err));
-      }
-    });
+          .then(() => settle("ready"))
+          .catch((err: unknown) => {
+            console.error("Mapillary moveTo failed", err);
+            settle(imageUrl ? "fallback" : "failed");
+          });
+      })
+      .catch((err) => {
+        console.error("Mapillary module load failed", err);
+        settle(imageUrl ? "fallback" : "failed");
+      });
 
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
-  }, [imageId]);
+  }, [imageId, imageUrl]);
 
-  useEffect(() => {
-    return () => {
+  useEffect(
+    () => () => {
       viewerRef.current?.remove?.();
       viewerRef.current = null;
-    };
+    },
+    []
+  );
+
+  const resetView = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      viewerRef.current?.setCenter([0.5, 0.5]);
+      viewerRef.current?.setZoom(0);
+    } catch {
+      /* ビューア未初期化 */
+    }
   }, []);
 
   if (!MAPILLARY_TOKEN) {
     return (
-      <div className="street-loading">
-        VITE_MAPILLARY_TOKENが未設定です。.envとCloudflare Pagesの環境変数を確認してください。
+      <div className="street-message">
+        <p className="street-message-title">ストリート画像トークンが未設定です</p>
+        <p>
+          <code>apps/web/.env</code> と Cloudflare Pages の環境変数に <code>VITE_MAPILLARY_TOKEN</code> を追加してください。
+        </p>
       </div>
     );
   }
 
   return (
-    <div style={{ width: "100%", height: "100%", position: "relative", background: "#000" }}>
-      {!ready && <div className="street-loading">画像を読み込み中...</div>}
-      <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
+    <div className="street-wrap">
+      <div ref={containerRef} className="street-canvas" style={{ visibility: phase === "ready" ? "visible" : "hidden" }} />
+
+      {phase === "fallback" && imageUrl && (
+        <img className="street-fallback" src={imageUrl} alt="現在地のストリート画像" />
+      )}
+
+      {phase === "loading" && (
+        <div className="street-message">
+          <span className="street-spinner" aria-hidden="true" />
+          <p>画像を読み込んでいます</p>
+        </div>
+      )}
+
+      {phase === "empty" && (
+        <div className="street-message">
+          <p>スタートすると、ここに現地の風景が出ます</p>
+        </div>
+      )}
+
+      {phase === "failed" && (
+        <div className="street-message">
+          <p className="street-message-title">画像を取得できませんでした</p>
+          <p>この地点には見られる画像がありません。地図のヒントだけで推理してください。</p>
+        </div>
+      )}
+
+      {phase === "ready" && (
+        <button type="button" className="street-btn" onClick={resetView}>
+          視点を戻す
+        </button>
+      )}
     </div>
   );
 }

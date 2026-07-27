@@ -2,9 +2,26 @@
 <html lang="ja">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#0F6E56" />
+    <!-- maximum-scale=1 は端末のピンチ拡大を潰してしまうので外し、代わりに interactive-widget でキーボード表示時のズレを防ぐ -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#070C0B" />
     <meta name="description" content="GeoChase: ストリートビューで場所を当てる位置推理ゲーム。移動するAIを追跡する「AI逃走モード」も搭載。" />
+
+    <!-- iOSのホーム画面アプリ用。manifestだけでは全画面表示にならない -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="GeoChase" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+
+    <!-- 共有時のカード表示 -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="GeoChase - 場所当て×AI追跡ゲーム" />
+    <meta property="og:description" content="ストリート画像だけを頼りに場所を推理。移動し続けるAIを追いつめよう。" />
+    <meta property="og:image" content="/icon-512.png" />
+    <meta name="twitter:card" content="summary" />
 
     <!--
       Google Search Console の「HTMLタグ」による所有権確認用。
@@ -12,24 +29,29 @@
     -->
     <meta name="google-site-verification" content="oHmE_f6ogd0ZE4WmHBdncsZGod_A0JaotcU5iLCqmXA" />
 
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <title>GeoChase - 場所当て×AI追跡ゲーム</title>
   </head>
   <body>
     <div id="root"></div>
 
+    <noscript>
+      <p style="padding: 24px; color: #e6eee9; font-family: sans-serif">
+        GeoChaseで遊ぶにはJavaScriptを有効にしてください。
+      </p>
+    </noscript>
+
     <div class="ad-bar">
       <div class="ad-mobile-slot">
         <!-- admax -->
-        <script src="https://adm.shinobi.jp/s/4b552c0531166d62690915a9f9ce5c62"></script>
+        <script async src="https://adm.shinobi.jp/s/4b552c0531166d62690915a9f9ce5c62"></script>
         <!-- admax -->
       </div>
       <div class="ad-pc-slot">
         <!-- admax -->
-        <script src="https://adm.shinobi.jp/s/f04ab2d2138d77559ded8cc7a03e2e3a"></script>
+        <script async src="https://adm.shinobi.jp/s/f04ab2d2138d77559ded8cc7a03e2e3a"></script>
         <!-- admax -->
         <!-- admax -->
-        <script src="https://adm.shinobi.jp/s/e7cf2cf2b13264f3a55a20b68b0f3107"></script>
+        <script async src="https://adm.shinobi.jp/s/e7cf2cf2b13264f3a55a20b68b0f3107"></script>
         <!-- admax -->
       </div>
     </div>

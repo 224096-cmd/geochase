@@ -1,15 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import MapView from "./components/MapView";
 import StreetView from "./components/StreetView";
+import InstallButton from "./components/InstallButton";
+import { API_URL, useGameRoom } from "./lib/useGameRoom";
+import { formatClock, formatDistance, formatScore, proximityMessage } from "./lib/format";
+import type { GuessResult, LatLng, Mode, StartOptions } from "./lib/types";
 
-const API_URL = import.meta.env.VITE_API_URL as string;
-const WS_URL = API_URL.replace(/^http/, "ws");
-
-type Mode = "classic" | "chase";
-type TabKey = "game" | "hints" | "settings";
+type PanelKey = "settings" | "hints" | "history" | null;
 
 const INTERVAL_OPTIONS = [
-  { seconds: 10, label: "10秒" },
+  { seconds: 15, label: "15秒" },
   { seconds: 30, label: "30秒" },
   { seconds: 60, label: "1分" },
   { seconds: 180, label: "3分" },
@@ -20,126 +20,174 @@ const INTERVAL_OPTIONS = [
 const TIME_LIMIT_OPTIONS = [
   { seconds: 0, label: "制限なし" },
   { seconds: 60, label: "1分" },
+  { seconds: 180, label: "3分" },
   { seconds: 300, label: "5分" },
   { seconds: 600, label: "10分" },
-  { seconds: 900, label: "15分" },
-  { seconds: 1800, label: "30分" },
 ];
 
-interface RoomState {
-  mode: Mode;
-  round: number;
-  maxRounds: number;
-  imageId: string;
-  hint: string;
-  revealedHints: string[];
-  status: "idle" | "running" | "finished";
-  region: string;
-  intervalSeconds: number;
-  timeLimitSeconds: number;
-  secondsUntilNext: number;
-  secondsElapsed: number;
+const ROUND_OPTIONS = [1, 3, 5, 8, 10];
+
+const SETTINGS_KEY = "geochase.settings.v1";
+const ROOM_KEY = "geochase.room.v1";
+
+const DEFAULT_SETTINGS: StartOptions = {
+  mode: "chase",
+  region: "japan_wide",
+  intervalSeconds: 60,
+  timeLimitSeconds: 0,
+  rounds: 5,
+};
+
+/** リロードやアプリ再起動でもゲームが続くようにルームIDを保存する。?room= があればそちらを優先 */
+function resolveRoomId(): string {
+  const fromUrl = new URLSearchParams(window.location.search).get("room");
+  if (fromUrl && /^[A-Za-z0-9_-]{4,64}$/.test(fromUrl)) {
+    localStorage.setItem(ROOM_KEY, fromUrl);
+    return fromUrl;
+  }
+  const saved = localStorage.getItem(ROOM_KEY);
+  if (saved) return saved;
+  const created = crypto.randomUUID().slice(0, 8);
+  localStorage.setItem(ROOM_KEY, created);
+  return created;
 }
 
-interface GuessResult {
-  distanceKm: number | null;
-  correct: boolean;
-  score: number;
-  target?: { lat: number; lng: number };
-  timeUp?: boolean;
+function loadSettings(): StartOptions {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : DEFAULT_SETTINGS;
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<TabKey>("game");
-  const [mode, setMode] = useState<Mode>("chase");
-  const [roomId] = useState(() => crypto.randomUUID().slice(0, 8));
+  const [roomId] = useState(resolveRoomId);
+  const [settings, setSettings] = useState<StartOptions>(loadSettings);
+  const [panel, setPanel] = useState<PanelKey>(null);
   const [regions, setRegions] = useState<{ key: string; label: string }[]>([]);
-  const [region, setRegion] = useState("japan_wide");
-  const [intervalSeconds, setIntervalSeconds] = useState(30);
-  const [timeLimitSeconds, setTimeLimitSeconds] = useState(0);
 
-  const [state, setState] = useState<RoomState | null>(null);
-  const [countdown, setCountdown] = useState(0);
-  const [elapsed, setElapsed] = useState(0);
-  const [imageReady, setImageReady] = useState(false);
-
-  const [guessPin, setGuessPin] = useState<{ lat: number; lng: number } | null>(null);
+  const [guessPin, setGuessPin] = useState<LatLng | null>(null);
   const [result, setResult] = useState<GuessResult | null>(null);
-  const [connected, setConnected] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const [imageReady, setImageReady] = useState(false);
   const [focusedPane, setFocusedPane] = useState<"street" | "map">("street");
-  const [streetSource, setStreetSource] = useState<"ai" | "explore">("ai");
-  const [exploreImageId, setExploreImageId] = useState("");
+  const [streetSource, setStreetSource] = useState<"live" | "explore">("live");
+  const [explore, setExplore] = useState<{ imageId: string; imageUrl: string } | null>(null);
   const [exploreLoading, setExploreLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [tick, setTick] = useState(0);
 
-  const wsRef = useRef<WebSocket | null>(null);
+  const lastRoundKey = useRef("");
 
+  const showToast = useCallback((message: string) => {
+    setToast(message);
+    window.setTimeout(() => setToast((t) => (t === message ? null : t)), 3200);
+  }, []);
+
+  const handleResult = useCallback(
+    (r: GuessResult) => {
+      setResult(r);
+      if (r.correct) {
+        navigator.vibrate?.([40, 60, 120]);
+        setGuessPin(null);
+      }
+    },
+    []
+  );
+
+  const handleCaught = useCallback(
+    (playerName: string | null, score: number) => {
+      showToast(`${playerName ?? "誰か"}が発見しました（+${formatScore(score)}）`);
+    },
+    [showToast]
+  );
+
+  const { state, connection, send, start, stop, serverNow } = useGameRoom({
+    roomId,
+    onResult: handleResult,
+    onCaught: handleCaught,
+  });
+
+  /* ---- 設定の保存 ---- */
   useEffect(() => {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  }, [settings]);
+
+  /* ---- 捜索範囲の一覧 ---- */
+  useEffect(() => {
+    if (!API_URL) return;
     fetch(`${API_URL}/regions`)
       .then((r) => r.json())
-      .then(setRegions)
+      .then((list) => Array.isArray(list) && setRegions(list))
       .catch(() => setRegions([{ key: "japan_wide", label: "日本全国" }]));
   }, []);
 
+  /* ---- ラウンドが変わったら表示をリセット ---- */
   useEffect(() => {
-    const ws = new WebSocket(`${WS_URL}/room/${roomId}/ws`);
-    wsRef.current = ws;
-    ws.onopen = () => setConnected(true);
-    ws.onclose = () => setConnected(false);
+    if (!state) return;
+    const key = `${state.status}:${state.round}:${state.imageId}`;
+    if (key === lastRoundKey.current) return;
+    lastRoundKey.current = key;
 
-    ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data);
-      if (msg.type === "state") {
-        setState((prev) => {
-          if (!prev || prev.round !== msg.round || prev.status !== msg.status) {
-            setImageReady(false);
-            setCountdown(msg.secondsUntilNext);
-            setStreetSource("ai");
-          }
-          return msg;
-        });
-        setElapsed(msg.secondsElapsed ?? 0);
-        if (msg.status === "running") setResult(null);
-        if (msg.status !== "running") setGuessPin(null);
-      }
-      if (msg.type === "result") setResult(msg);
-      if (msg.type === "caught") setResult((r) => (r ? { ...r, correct: true } : r));
-    };
+    setImageReady(false);
+    setStreetSource("live");
+    setExplore(null);
+    if (state.status === "running") {
+      setResult(null);
+      setGuessPin(null);
+    }
+  }, [state]);
 
-    return () => ws.close();
-  }, [roomId]);
-
+  /* ---- カウントダウン用のティック。表示はサーバー時刻から計算するのでズレない ---- */
   useEffect(() => {
-    if (!state || state.mode !== "chase" || state.status !== "running" || !imageReady) return;
-    const timer = setInterval(() => setCountdown((c) => Math.max(0, c - 1)), 1000);
-    return () => clearInterval(timer);
-  }, [state?.status, state?.mode, state?.round, imageReady]);
+    const running = state?.status === "running" && (state.nextUpdateAt > 0 || state.roundEndsAt > 0);
+    if (!running) return;
+    const timer = window.setInterval(() => setTick((t) => t + 1), 250);
+    return () => window.clearInterval(timer);
+  }, [state?.status, state?.nextUpdateAt, state?.roundEndsAt]);
 
-  useEffect(() => {
-    if (!state || state.mode !== "classic" || state.status !== "running" || state.timeLimitSeconds <= 0) return;
-    const timer = setInterval(() => setElapsed((e) => e + 1), 1000);
-    return () => clearInterval(timer);
-  }, [state?.status, state?.mode]);
-
-  const start = useCallback(async () => {
-    setGuessPin(null);
+  /* ---- 操作 ---- */
+  const handleStart = useCallback(async () => {
+    setBusy(true);
     setResult(null);
-    setExploreImageId("");
-    setStreetSource("ai");
-    await fetch(`${API_URL}/room/${roomId}/start`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode, region, intervalSeconds, timeLimitSeconds }),
-    });
-  }, [roomId, mode, region, intervalSeconds, timeLimitSeconds]);
+    setGuessPin(null);
+    setExplore(null);
+    try {
+      await start(settings);
+      setPanel(null);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "スタートに失敗しました");
+    } finally {
+      setBusy(false);
+    }
+  }, [settings, start, showToast]);
 
-  const stop = useCallback(async () => {
-    await fetch(`${API_URL}/room/${roomId}/stop`, { method: "POST" });
-  }, [roomId]);
+  const handleStop = useCallback(async () => {
+    setBusy(true);
+    try {
+      await stop();
+    } finally {
+      setBusy(false);
+    }
+  }, [stop]);
 
   const submitGuess = useCallback(() => {
-    if (!guessPin || !wsRef.current) return;
-    wsRef.current.send(JSON.stringify({ type: "guess", lat: guessPin.lat, lng: guessPin.lng, userId: roomId }));
-  }, [guessPin, roomId]);
+    if (!guessPin) return;
+    const ok = send({ type: "guess", lat: guessPin.lat, lng: guessPin.lng, userId: roomId });
+    if (!ok) showToast("接続が切れています。復帰を待っています");
+  }, [guessPin, roomId, send, showToast]);
+
+  const requestHint = useCallback(() => {
+    if (!send({ type: "hint" })) showToast("接続が切れています");
+    else setPanel("hints");
+  }, [send, showToast]);
+
+  const nextRound = useCallback(() => {
+    setResult(null);
+    setGuessPin(null);
+    send({ type: "next" });
+  }, [send]);
 
   const exploreHere = useCallback(async () => {
     if (!guessPin) return;
@@ -147,169 +195,411 @@ export default function App() {
     try {
       const res = await fetch(`${API_URL}/nearby-image?lat=${guessPin.lat}&lng=${guessPin.lng}`);
       const data = await res.json();
-      if (data?.imageId) {
-        setExploreImageId(data.imageId);
+      if (data?.found && data.imageId) {
+        setExplore({ imageId: data.imageId, imageUrl: data.imageUrl ?? "" });
         setStreetSource("explore");
         setFocusedPane("street");
+      } else {
+        showToast(data?.error ?? "この付近には画像がありません");
       }
+    } catch {
+      showToast("画像の検索に失敗しました");
     } finally {
       setExploreLoading(false);
     }
-  }, [guessPin]);
+  }, [guessPin, showToast]);
 
+  const shareResult = useCallback(async () => {
+    if (!state) return;
+    const text = `GeoChase で ${formatScore(state.totalScore)} 点（${state.mode === "chase" ? "AI逃走モード" : "通常モード"} / ${state.round}ラウンド）`;
+    const url = `${window.location.origin}${window.location.pathname}`;
+    try {
+      if (navigator.share) await navigator.share({ title: "GeoChase", text, url });
+      else {
+        await navigator.clipboard.writeText(`${text}\n${url}`);
+        showToast("結果をコピーしました");
+      }
+    } catch {
+      /* ユーザーがキャンセルした */
+    }
+  }, [state, showToast]);
+
+  /* ---- キーボード操作（PC向け） ---- */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) return;
+      if (e.key === "Enter" && guessPin && state?.status === "running") {
+        e.preventDefault();
+        submitGuess();
+      }
+      if (e.key.toLowerCase() === "m") setFocusedPane((p) => (p === "street" ? "map" : "street"));
+      if (e.key.toLowerCase() === "h" && state?.status === "running") requestHint();
+      if (e.key === "Escape") setPanel(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [guessPin, state?.status, submitGuess, requestHint]);
+
+  /* ---- 派生値 ---- */
   const isRunning = state?.status === "running";
+  const isReveal = state?.status === "reveal";
+  const isFinished = state?.status === "finished";
   const isIdle = !state || state.status === "idle";
-  const mainButtonLabel = isIdle ? "スタート" : isRunning ? "ストップ" : "リスタート";
-  const handleMainButton = () => (isRunning ? stop() : start());
 
-  const remainingClassicSeconds =
-    state?.mode === "classic" && state.timeLimitSeconds > 0 ? Math.max(0, state.timeLimitSeconds - elapsed) : null;
+  const countdown = useMemo(() => {
+    void tick;
+    if (!state || state.status !== "running") return null;
+    const deadline = state.nextUpdateAt || state.roundEndsAt;
+    if (!deadline) return null;
+    const total = state.nextUpdateAt ? state.intervalSeconds * 1000 : state.timeLimitSeconds * 1000;
+    const remainingMs = Math.max(0, deadline - serverNow());
+    return {
+      seconds: remainingMs / 1000,
+      ratio: total > 0 ? Math.max(0, Math.min(1, remainingMs / total)) : 0,
+      label: state.nextUpdateAt ? "次の移動まで" : "残り時間",
+    };
+  }, [state, serverNow, tick]);
 
-  const displayedImageId = streetSource === "ai" ? state?.imageId ?? "" : exploreImageId;
+  const displayed = streetSource === "explore" && explore ? explore : { imageId: state?.imageId ?? "", imageUrl: state?.imageUrl ?? "" };
+  const targetPosition = result?.target ?? null;
+  const urgency = countdown ? (countdown.ratio < 0.15 ? "critical" : countdown.ratio < 0.4 ? "warn" : "calm") : "calm";
+
+  /* ---- 設定不備の案内 ---- */
+  if (!API_URL) {
+    return (
+      <div className="setup-screen">
+        <h1>GeoChase</h1>
+        <p className="setup-title">APIの接続先が設定されていません</p>
+        <p>
+          <code>apps/web/.env</code> に <code>VITE_API_URL</code> を追加し、Cloudflare Pages の環境変数にも同じ値を設定してください。
+        </p>
+        <pre>VITE_API_URL=https://geochase-api.example.workers.dev</pre>
+      </div>
+    );
+  }
 
   return (
-    <div className="app-shell">
-      <header className="app-header">
-        <h1>GeoChase</h1>
-        <button className="start-btn" onClick={handleMainButton} disabled={!connected}>
-          {mainButtonLabel}
-        </button>
+    <div className="app" data-panel={panel ?? "none"}>
+      <header className="topbar">
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true" />
+          <span className="brand-name">GeoChase</span>
+        </div>
+
+        <div className="topbar-meta">
+          <span className={`link-dot link-${connection}`} aria-hidden="true" />
+          <span className="link-label">
+            {connection === "online" ? `接続中・${state?.players ?? 1}人` : connection === "connecting" ? "接続しています" : "再接続しています"}
+          </span>
+        </div>
+
+        <div className="topbar-actions">
+          <InstallButton />
+          <button
+            type="button"
+            className="primary-btn"
+            onClick={isRunning ? handleStop : handleStart}
+            disabled={busy || connection === "offline"}
+          >
+            {isIdle ? "スタート" : isRunning ? "ストップ" : "もう一度"}
+          </button>
+        </div>
       </header>
 
-      <nav className="top-tabs">
-        <button className={activeTab === "game" ? "active" : ""} onClick={() => setActiveTab("game")}>
-          ゲーム
-        </button>
-        <button className={activeTab === "hints" ? "active" : ""} onClick={() => setActiveTab("hints")}>
-          ヒント{state && state.revealedHints.length > 0 ? ` (${state.revealedHints.length})` : ""}
-        </button>
-        <button className={activeTab === "settings" ? "active" : ""} onClick={() => setActiveTab("settings")}>
-          設定
-        </button>
-      </nav>
-
-      {activeTab === "settings" && (
-        <section className="settings-panel">
-          <label>
-            モード
-            <select value={mode} onChange={(e) => setMode(e.target.value as Mode)} disabled={isRunning}>
-              <option value="chase">AI逃走モード</option>
-              <option value="classic">通常モード</option>
-            </select>
-          </label>
-          <label>
-            捜索範囲
-            <select value={region} onChange={(e) => setRegion(e.target.value)} disabled={isRunning}>
-              {regions.map((r) => (
-                <option key={r.key} value={r.key}>
-                  {r.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          {mode === "chase" && (
-            <label>
-              AI更新間隔
-              <select value={intervalSeconds} onChange={(e) => setIntervalSeconds(Number(e.target.value))} disabled={isRunning}>
-                {INTERVAL_OPTIONS.map((o) => (
-                  <option key={o.seconds} value={o.seconds}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {mode === "classic" && (
-            <label>
-              制限時間
-              <select value={timeLimitSeconds} onChange={(e) => setTimeLimitSeconds(Number(e.target.value))} disabled={isRunning}>
-                {TIME_LIMIT_OPTIONS.map((o) => (
-                  <option key={o.seconds} value={o.seconds}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          <p className="settings-note">設定を変えてから上の「スタート」を押してください。</p>
-        </section>
-      )}
-
-      {activeTab === "hints" && (
-        <section className="hints-panel">
-          {!state || state.revealedHints.length === 0 ? (
-            <p className="settings-note">ゲームを開始するとヒントがここに表示されます。</p>
-          ) : (
-            <ul>
-              {state.revealedHints.map((h, i) => (
-                <li key={i}>{h}</li>
-              ))}
-            </ul>
-          )}
-        </section>
-      )}
-
-      {activeTab === "game" && (
-        <>
-          {state && state.status !== "idle" && (
-            <div className="status-bar">
-              <span className="pill">
-                ラウンド {state.round} / {state.maxRounds}
-              </span>
-              {state.mode === "chase" && <span className="pill accent">次の更新まで {imageReady ? countdown : "画像読込中"}秒</span>}
-              {remainingClassicSeconds !== null && <span className="pill accent">残り時間 {remainingClassicSeconds}秒</span>}
-              {state.status === "finished" && <span className="pill success">終了</span>}
+      {/* 進行状況の計器バー */}
+      {state && state.status !== "idle" && (
+        <div className="readout" data-urgency={urgency}>
+          <div className="readout-cell">
+            <span className="readout-label">ラウンド</span>
+            <span className="readout-value">
+              {state.round}<span className="readout-sub">/{state.maxRounds}</span>
+            </span>
+          </div>
+          <div className="readout-cell">
+            <span className="readout-label">合計スコア</span>
+            <span className="readout-value">{formatScore(state.totalScore)}</span>
+          </div>
+          {countdown && (
+            <div className="readout-cell readout-timer">
+              <span className="readout-label">{countdown.label}</span>
+              <span className="readout-value">{formatClock(countdown.seconds)}</span>
+              <span className="readout-bar" style={{ transform: `scaleX(${countdown.ratio})` }} />
             </div>
           )}
-
-          {result && (
-            <div className={`result-banner ${result.correct ? "correct" : "wrong"}`}>
-              {result.timeUp
-                ? "時間切れ！"
-                : result.correct
-                ? `特定成功！ スコア ${result.score}`
-                : `距離 約${result.distanceKm}km　スコア ${result.score}`}
+          {state.mode === "chase" && state.attempts > 0 && (
+            <div className="readout-cell">
+              <span className="readout-label">試行</span>
+              <span className="readout-value">{state.attempts}</span>
             </div>
           )}
+          {isFinished && <span className="badge">終了</span>}
+        </div>
+      )}
 
-          <main className="stage">
-            <section className={`pane street-pane ${focusedPane === "street" ? "focused" : "pip"}`} onClick={() => setFocusedPane("street")}>
-              <div className="pane-tabs">
-                <span className={streetSource === "ai" ? "active" : ""} onClick={(e) => { e.stopPropagation(); setStreetSource("ai"); }}>
-                  AI映像
-                </span>
-                {exploreImageId && (
-                  <span className={streetSource === "explore" ? "active" : ""} onClick={(e) => { e.stopPropagation(); setStreetSource("explore"); }}>
-                    探索
-                  </span>
+      {result && (
+        <div className={`result ${result.correct ? "is-correct" : "is-miss"}`} role="status">
+          <strong>
+            {result.timeUp
+              ? "時間切れ"
+              : result.correct
+              ? `発見！ +${formatScore(result.score)}`
+              : state?.mode === "chase"
+              ? proximityMessage(result.proximity, result.bearing)
+              : `${formatDistance(result.distanceKm)}のずれ・${formatScore(result.score)}点`}
+          </strong>
+          {!result.correct && state?.mode === "chase" && result.distanceKm !== null && (
+            <span className="result-sub">誤差 {formatDistance(result.distanceKm)}</span>
+          )}
+        </div>
+      )}
+
+      <div className="layout">
+        <main className="stage" data-focus={focusedPane}>
+          <section
+            className="pane pane-street"
+            onClick={() => setFocusedPane("street")}
+            aria-label="ストリート画像"
+          >
+            <div className="pane-tabs">
+              <button
+                type="button"
+                className={streetSource === "live" ? "is-active" : ""}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setStreetSource("live");
+                }}
+              >
+                現地映像
+              </button>
+              {explore && (
+                <button
+                  type="button"
+                  className={streetSource === "explore" ? "is-active" : ""}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setStreetSource("explore");
+                  }}
+                >
+                  下見
+                </button>
+              )}
+            </div>
+            <StreetView
+              imageId={displayed.imageId}
+              imageUrl={displayed.imageUrl}
+              onReady={() => setImageReady(true)}
+            />
+          </section>
+
+          <section className="pane pane-map" onClick={() => setFocusedPane("map")} aria-label="地図">
+            <MapView
+              onPick={(lat, lng) => setGuessPin({ lat, lng })}
+              markerPosition={guessPin}
+              targetPosition={targetPosition}
+              trail={state?.revealedTrail ?? []}
+              locked={!isRunning}
+            />
+          </section>
+
+          <button
+            type="button"
+            className="swap-btn"
+            onClick={() => setFocusedPane((p) => (p === "street" ? "map" : "street"))}
+          >
+            {focusedPane === "street" ? "地図を大きく" : "映像を大きく"}
+          </button>
+        </main>
+
+        <aside className="sidebar" aria-label="パネル">
+          <nav className="panel-tabs">
+            <button type="button" className={panel === "settings" ? "is-active" : ""} onClick={() => setPanel(panel === "settings" ? null : "settings")}>
+              設定
+            </button>
+            <button type="button" className={panel === "hints" ? "is-active" : ""} onClick={() => setPanel(panel === "hints" ? null : "hints")}>
+              ヒント{state && state.revealedHints.length > 0 ? `・${state.revealedHints.length}` : ""}
+            </button>
+            <button type="button" className={panel === "history" ? "is-active" : ""} onClick={() => setPanel(panel === "history" ? null : "history")}>
+              記録
+            </button>
+          </nav>
+
+          <div className="panel-body">
+            {panel === "settings" && (
+              <section className="panel">
+                <h2>ゲーム設定</h2>
+                <label className="field">
+                  <span>モード</span>
+                  <select
+                    value={settings.mode}
+                    onChange={(e) => setSettings((s) => ({ ...s, mode: e.target.value as Mode }))}
+                    disabled={isRunning}
+                  >
+                    <option value="chase">AI逃走モード</option>
+                    <option value="classic">通常モード</option>
+                  </select>
+                </label>
+
+                <label className="field">
+                  <span>捜索範囲</span>
+                  <select
+                    value={settings.region}
+                    onChange={(e) => setSettings((s) => ({ ...s, region: e.target.value }))}
+                    disabled={isRunning}
+                  >
+                    {regions.map((r) => (
+                      <option key={r.key} value={r.key}>
+                        {r.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                {settings.mode === "chase" ? (
+                  <label className="field">
+                    <span>AIが移動する間隔</span>
+                    <select
+                      value={settings.intervalSeconds}
+                      onChange={(e) => setSettings((s) => ({ ...s, intervalSeconds: Number(e.target.value) }))}
+                      disabled={isRunning}
+                    >
+                      {INTERVAL_OPTIONS.map((o) => (
+                        <option key={o.seconds} value={o.seconds}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : (
+                  <>
+                    <label className="field">
+                      <span>1ラウンドの制限時間</span>
+                      <select
+                        value={settings.timeLimitSeconds}
+                        onChange={(e) => setSettings((s) => ({ ...s, timeLimitSeconds: Number(e.target.value) }))}
+                        disabled={isRunning}
+                      >
+                        {TIME_LIMIT_OPTIONS.map((o) => (
+                          <option key={o.seconds} value={o.seconds}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="field">
+                      <span>ラウンド数</span>
+                      <select
+                        value={settings.rounds}
+                        onChange={(e) => setSettings((s) => ({ ...s, rounds: Number(e.target.value) }))}
+                        disabled={isRunning}
+                      >
+                        {ROUND_OPTIONS.map((n) => (
+                          <option key={n} value={n}>
+                            {n}ラウンド
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </>
                 )}
-              </div>
-              <StreetView imageId={displayedImageId} onReady={() => setImageReady(true)} />
-              {focusedPane !== "street" && <div className="pip-overlay" />}
-            </section>
 
-            <section className={`pane map-pane ${focusedPane === "map" ? "focused" : "pip"}`} onClick={() => setFocusedPane("map")}>
-              <MapView
-                onPick={(lat, lng) => setGuessPin({ lat, lng })}
-                markerPosition={guessPin}
-                targetPosition={result?.target ?? null}
-              />
-              {focusedPane !== "map" && <div className="pip-overlay" />}
-            </section>
-          </main>
+                <p className="note">設定を変えたら上の「スタート」でやり直します。</p>
 
-          <footer className="app-footer">
-            {guessPin && (
-              <button className="explore-btn" onClick={exploreHere} disabled={exploreLoading}>
-                {exploreLoading ? "検索中..." : "この地点をストリートビューで見る"}
+                <div className="room-row">
+                  <span className="note">ルームID: <code>{roomId}</code></span>
+                  <button
+                    type="button"
+                    className="ghost-btn"
+                    onClick={async () => {
+                      const url = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
+                      await navigator.clipboard.writeText(url);
+                      showToast("招待リンクをコピーしました");
+                    }}
+                  >
+                    招待リンクをコピー
+                  </button>
+                </div>
+                <p className="note">同じリンクを開いた人と同じAIを一緒に追えます。</p>
+              </section>
+            )}
+
+            {panel === "hints" && (
+              <section className="panel">
+                <h2>ヒント</h2>
+                {state && state.revealedHints.length > 0 ? (
+                  <ol className="hint-list">
+                    {state.revealedHints.map((h, i) => (
+                      <li key={i}>{h}</li>
+                    ))}
+                  </ol>
+                ) : (
+                  <p className="note">ヒントはまだ開いていません。</p>
+                )}
+
+                {isRunning && (
+                  <>
+                    <button type="button" className="ghost-btn wide" onClick={requestHint} disabled={!state || state.hintsAvailable === 0}>
+                      {state && state.hintsAvailable > 0 ? `次のヒントを開く（−250点）` : "これ以上ヒントはありません"}
+                    </button>
+                    {state && state.hintPenalty > 0 && <p className="note">このラウンドの減点: −{formatScore(state.hintPenalty)}</p>}
+                  </>
+                )}
+              </section>
+            )}
+
+            {panel === "history" && (
+              <section className="panel">
+                <h2>ラウンド記録</h2>
+                {state && state.history.length > 0 ? (
+                  <ul className="history-list">
+                    {state.history.map((h) => (
+                      <li key={h.round}>
+                        <span className="history-round">R{h.round}</span>
+                        <span className="history-distance">{h.guess ? formatDistance(h.distanceKm) : "未回答"}</span>
+                        <span className="history-score">{formatScore(h.score)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="note">まだ記録はありません。</p>
+                )}
+                {state && state.history.length > 0 && (
+                  <button type="button" className="ghost-btn wide" onClick={shareResult}>
+                    結果を共有
+                  </button>
+                )}
+              </section>
+            )}
+          </div>
+        </aside>
+      </div>
+
+      <footer className="actionbar">
+        {isReveal ? (
+          <button type="button" className="primary-btn wide" onClick={nextRound}>
+            次のラウンドへ
+          </button>
+        ) : isFinished ? (
+          <button type="button" className="primary-btn wide" onClick={handleStart} disabled={busy}>
+            もう一度あそぶ（合計 {formatScore(state?.totalScore ?? 0)}点）
+          </button>
+        ) : (
+          <>
+            {guessPin && isRunning && (
+              <button type="button" className="ghost-btn" onClick={exploreHere} disabled={exploreLoading}>
+                {exploreLoading ? "探しています" : "この地点を下見する"}
               </button>
             )}
-            <button className="guess-btn" onClick={submitGuess} disabled={!guessPin || !isRunning}>
-              {guessPin ? "推理を確定" : "地図をタップしてピンを立てる"}
+            <button type="button" className="primary-btn wide" onClick={submitGuess} disabled={!guessPin || !isRunning}>
+              {!isRunning ? "スタートすると回答できます" : guessPin ? "ここだと回答する" : "地図をタップしてピンを置く"}
             </button>
-          </footer>
-        </>
-      )}
+          </>
+        )}
+      </footer>
+
+      {panel && <button type="button" className="panel-scrim" aria-label="パネルを閉じる" onClick={() => setPanel(null)} />}
+      {toast && <div className="toast" role="status">{toast}</div>}
+      {!imageReady && isRunning && state?.imageId && <span className="sr-only">画像を読み込んでいます</span>}
     </div>
   );
 }
