@@ -654,24 +654,24 @@ export default function App() {
               記録
             </button>
           </nav>
+
+          <footer className="actionbar">
+            {isReveal ? (
+              <button type="button" className="primary-btn wide" onClick={nextRound}>
+                次のラウンドへ
+              </button>
+            ) : isFinished ? (
+              <button type="button" className="primary-btn wide" onClick={handleStart} disabled={busy}>
+                もう一度あそぶ（合計 {formatScore(state?.totalScore ?? 0)}点）
+              </button>
+            ) : (
+              <button type="button" className="primary-btn wide" onClick={submitGuess} disabled={!guessPin || !isRunning}>
+                {!isRunning ? "スタートすると回答できます" : guessPin ? "ここだと回答する" : "地図をタップしてピンを置く"}
+              </button>
+            )}
+          </footer>
         </aside>
       </div>
-
-      <footer className="actionbar">
-        {isReveal ? (
-          <button type="button" className="primary-btn wide" onClick={nextRound}>
-            次のラウンドへ
-          </button>
-        ) : isFinished ? (
-          <button type="button" className="primary-btn wide" onClick={handleStart} disabled={busy}>
-            もう一度あそぶ（合計 {formatScore(state?.totalScore ?? 0)}点）
-          </button>
-        ) : (
-          <button type="button" className="primary-btn wide" onClick={submitGuess} disabled={!guessPin || !isRunning}>
-            {!isRunning ? "スタートすると回答できます" : guessPin ? "ここだと回答する" : "地図をタップしてピンを置く"}
-          </button>
-        )}
-      </footer>
 
       {toast && (
         <div className="toast" role="status">

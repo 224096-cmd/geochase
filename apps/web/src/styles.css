@@ -4,7 +4,7 @@
    レイアウト方針（v2で全面的に見直し）:
    - 高さは body > #root > .app > .layout > .stage の flex チェーンで通す。
      grid-template-rows は「表示されない子がある」と行がズレて画面が飛ぶため使わない。
-   - 100dvh はスマホでツールバーが出入りするたびに伸縮するので 100svh を使う。
+   - 高さは 100dvh。flexなので伸縮しても各要素の比率が保たれ、画面下に隙間が出ない。
    - 計器バーは常時表示、結果バナーは stage の上に重ねる。
      どちらも高さを変えないので、操作しても表示位置がずれない。
    - 広告バーは position:fixed をやめて body の flex 子にする（必ず見える）。
@@ -30,7 +30,8 @@
 
   --radius: 12px;
   --radius-sm: 8px;
- --ad-h: 50px;
+  --ad-h: 50px;
+  --pip: 88px; /* スマホで控えの画面を出す正方形の一辺 */
   --tap: 44px;
 }
 
@@ -45,7 +46,8 @@ html {
 body {
   margin: 0;
   height: 100vh;
-  height: 100svh; /* ツールバーの出入りで高さが変わらないよう svh を使う */
+  /* dvh は実際に見えている高さ。svh だとツールバーが隠れたとき下に隙間が残る */
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -110,6 +112,7 @@ code {
 }
 
 .layout {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
@@ -606,7 +609,7 @@ code {
   border-radius: var(--radius-sm);
   padding: 10px;
   min-height: var(--tap);
-  font-size: 15px;
+  font-size: 15px; /* 16px未満だとiOSで入力時にズームするため、selectは15pxまで */
 }
 
 .field select:disabled { opacity: 0.5; }
@@ -763,26 +766,33 @@ code {
    ========================================================================== */
 
 @media (max-width: 899px) {
-  /* 小窓を重ねると主画面の操作を邪魔するので、上下に分けて重ならないようにする */
+  /* 主画面はステージいっぱい。控えの画面は下の帯に正方形で置く。
+     控えを .layout 基準で配置したいので、.stage の position:relative を外す */
   .stage {
+    position: static;
     display: flex;
-    flex-direction: column;
-    gap: 6px;
     padding: 6px;
   }
 
   .stage[data-focus="street"] .pane-street,
   .stage[data-focus="map"] .pane-map {
     flex: 1 1 auto;
-    min-height: 0;
-    order: 0;
+    min-width: 0;
   }
 
-  /* 控えの画面は下部の帯。タップで入れ替わる */
+  /*
+    控えの画面は .layout 基準の絶対配置。左下の正方形にして、
+    右側にタブと回答ボタンを2段で並べる。1つの帯にまとめることで
+    「帯＋タブ＋ボタン」の3段ぶんの高さを1段に圧縮し、主画面を広く取る。
+  */
   .stage[data-focus="street"] .pane-map,
   .stage[data-focus="map"] .pane-street {
-    flex: 0 0 88px;
-    order: 1;
+    position: absolute;
+    left: 6px;
+    bottom: 6px;
+    width: var(--pip);
+    height: var(--pip);
+    z-index: 5;
     cursor: pointer;
   }
 
@@ -792,10 +802,20 @@ code {
     pointer-events: none;
   }
 
-  /* 下の帯を詰めて主画面を広くする */
-  .panel-tabs { padding: 5px 8px; }
+  /* 下の帯: 左の正方形ぶんを空けて、タブと回答ボタンを縦に並べる */
+  .sidebar {
+    min-height: calc(var(--pip) + 12px);
+    padding: 6px 6px 6px calc(var(--pip) + 12px);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 6px;
+    border-top: none;
+  }
+
+  .panel-tabs { padding: 0; border-top: none; }
   .panel-tabs button { min-height: 34px; padding: 6px 4px; }
-  .actionbar { padding: 6px 8px; }
+  .actionbar { padding: 0; border-top: none; }
   .actionbar .primary-btn { min-height: 46px; }
   .readout-cell { padding: 6px 10px 8px; }
 
@@ -835,12 +855,9 @@ code {
     display: block;
     position: fixed;
     right: 10px;
-    bottom: 66px;
+    bottom: 8px;
     z-index: 90;
   }
-
-  /* 固定した300x250の下にパネルが潜り込まないよう余白を確保 */
-  .sidebar { padding-bottom: 266px; }
 
   .layout { flex-direction: row; }
 
@@ -857,7 +874,11 @@ code {
     flex-direction: column;
     min-height: 0;
     border-left: 1px solid var(--line-soft);
+    /* 右下に固定した300x250の広告と重ならないよう、その高さぶん空ける */
+    padding-bottom: 266px;
   }
+
+  .actionbar { border-top: 1px solid var(--line-soft); }
 
   .panel-tabs { order: -1; border-top: none; border-bottom: 1px solid var(--line-soft); }
 
