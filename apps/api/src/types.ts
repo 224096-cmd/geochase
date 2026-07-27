@@ -11,32 +11,23 @@ export interface LatLng {
   lng: number;
 }
 
-export interface ChaseUpdateMessage {
-  type: "update";
-  round: number;
-  imageUrl: string;
-  hint: string;
-  secondsUntilNext: number;
-}
+export type RegionKey =
+  | "hokkaido"
+  | "tohoku"
+  | "kanto"
+  | "chubu"
+  | "kinki"
+  | "chugoku"
+  | "shikoku"
+  | "kyushu_okinawa"
+  | "japan_wide"
+  | "world";
 
-export interface GuessMessage {
-  type: "guess";
-  lat: number;
-  lng: number;
-}
+export type GameMode = "classic" | "chase";
 
-export interface GuessResultMessage {
-  type: "result";
-  distanceKm: number;
-  correct: boolean;
-  score: number;
-}
-
-export interface StateMessage {
-  type: "state";
-  round: number;
-  imageUrl: string;
-  hint: string;
-  secondsUntilNext: number;
-  status: "running" | "finished";
+export interface StartRequestBody {
+  mode?: GameMode;
+  region?: RegionKey;
+  intervalSeconds?: number; // AI逃走モードの移動間隔(秒)
+  timeLimitSeconds?: number; // 通常モードの制限時間(秒)。最大1800(30分)
 }

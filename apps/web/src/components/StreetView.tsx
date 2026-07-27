@@ -1,87 +1,75 @@
-import { useEffect, useRef } from "react";
-import { Viewer } from "mapillary-js";
+import { useEffect, useRef, useState } from "react";
 import "mapillary-js/dist/mapillary.css";
 
 interface Props {
   imageId: string;
-  imageMissing: boolean;
+  onReady?: () => void;
 }
 
 const MAPILLARY_TOKEN = import.meta.env.VITE_MAPILLARY_TOKEN;
 
-// mapillary-jsで実際に操作できる360度ストリートビューを表示する。
-// imageIdが無い(=その地点にMapillaryの撮影データが無かった)場合は
-// ヒントだけで推理してもらう旨を表示する。
-export default function StreetView({ imageId, imageMissing }: Props) {
+export default function StreetView({ imageId, onReady }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const viewerRef = useRef<Viewer | null>(null);
+  const viewerRef = useRef<any>(null);
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
-  if (!containerRef.current || !imageId) return;
+    if (!containerRef.current || !imageId || !MAPILLARY_TOKEN) return;
+    let cancelled = false;
 
-  viewerRef.current?.remove();
+    import("mapillary-js").then(({ Viewer }) => {
+      if (cancelled || !containerRef.current) return;
 
-  viewerRef.current = new Viewer({
-    accessToken: MAPILLARY_TOKEN,
-    container: containerRef.current,
-    imageId,
-  });
+      if (!viewerRef.current) {
+        try {
+          const viewer = new Viewer({
+            accessToken: MAPILLARY_TOKEN,
+            container: containerRef.current,
+            imageId,
+            component: { cover: false },
+          });
+          viewer.on("image", () => {
+            setReady(true);
+            onReady?.();
+          });
+          viewerRef.current = viewer;
+        } catch (err) {
+          console.error("Mapillary viewer init failed", err);
+        }
+      } else {
+        viewerRef.current
+          .moveTo(imageId)
+          .then(() => {
+            setReady(true);
+            onReady?.();
+          })
+          .catch((err: unknown) => console.error("moveTo failed", err));
+      }
+    });
 
-  return () => {
-    viewerRef.current?.remove();
-    viewerRef.current = null;
-  };
-
-}, [imageId]);
-
-  useEffect(() => {
-    if (viewerRef.current && imageId) {
-      viewerRef.current.moveTo(imageId).catch((err) => console.error("moveTo failed", err));
-    }
+    return () => {
+      cancelled = true;
+    };
   }, [imageId]);
 
-  if (imageMissing) {
+  useEffect(() => {
+    return () => {
+      viewerRef.current?.remove?.();
+      viewerRef.current = null;
+    };
+  }, []);
+
+  if (!MAPILLARY_TOKEN) {
     return (
-      <div
-        style={{
-          width: "100%",
-          height: "100%",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          background: "#1c1c1c",
-          color: "#ddd",
-          gap: 8,
-          textAlign: "center",
-          padding: 16,
-        }}
-      >
-        <span style={{ fontSize: 28 }}>📍</span>
-        <p style={{ margin: 0, fontSize: 14 }}>この地点の画像は見つかりませんでした</p>
-        <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>ヒントだけで推理してください</p>
+      <div className="street-loading">
+        VITE_MAPILLARY_TOKENが未設定です。.envとCloudflare Pagesの環境変数を確認してください。
       </div>
     );
   }
 
   return (
     <div style={{ width: "100%", height: "100%", position: "relative", background: "#000" }}>
-      {!imageId && (
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "#ccc",
-            fontSize: 13,
-            zIndex: 1,
-          }}
-        >
-          画像を読み込み中...
-        </div>
-      )}
+      {!ready && <div className="street-loading">画像を読み込み中...</div>}
       <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
     </div>
   );

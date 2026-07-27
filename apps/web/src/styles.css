@@ -13,9 +13,9 @@ body {
 .app-shell {
   display: flex;
   flex-direction: column;
-  height: 100dvh;
-  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
-    env(safe-area-inset-left);
+  height: calc(100dvh - 50px);
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
   overflow: hidden;
 }
 
@@ -160,29 +160,71 @@ body {
   color: #f0a3a3;
 }
 
+
+/* ===========================
+   メイン表示エリア
+   =========================== */
+
 .stage {
   flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  position: relative;
   padding: 0 12px;
   min-height: 0;
 }
 
 .pane {
+  position: absolute;
   border-radius: 12px;
   overflow: hidden;
   border: 1px solid #2a3d37;
-  min-height: 0;
+  background: #000;
+  transition: all 0.25s ease;
 }
 
-.street-pane {
-  flex: 1 1 55%;
+
+/* 全画面表示 */
+.pane.focused {
+  top: 0;
+  bottom: 0;
+  left: 12px;
+  right: 12px;
+  z-index: 1;
 }
 
-.map-pane {
-  flex: 1 1 45%;
+
+/* 小窓表示 */
+.pane.pip {
+  width: 38%;
+  height: 30%;
+  max-width: 220px;
+  max-height: 160px;
+  left: 12px;
+  bottom: 8px;
+  z-index: 2;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
 }
+
+
+.pip-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  cursor: pointer;
+}
+
+
+.street-loading {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #9fb3ac;
+  font-size: 12px;
+  text-align: center;
+  padding: 12px;
+}
+
 
 .placeholder {
   width: 100%;
@@ -194,6 +236,11 @@ body {
   font-size: 13px;
   background: #182420;
 }
+
+
+/* ===========================
+   フッター
+   =========================== */
 
 .app-footer {
   padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
@@ -217,6 +264,270 @@ body {
   color: #6f8a82;
 }
 
+
+/* ===========================
+   Leaflet
+   =========================== */
+
 .leaflet-container {
   background: #0b1210;
+}
+
+
+/* ===========================
+   広告バー
+   =========================== */
+
+.ad-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 50px;
+  z-index: 100;
+  background: #0b1210;
+  border-top: 1px solid #2a3d37;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+
+.ad-mobile-slot {
+  display: none;
+}
+
+
+.ad-pc-slot {
+  display: flex;
+  gap: 8px;
+}
+
+
+@media (max-width: 640px) {
+
+  .ad-mobile-slot {
+    display: block;
+  }
+
+  .ad-pc-slot {
+    display: none;
+  }
+
+}
+
+/* ==== タブナビゲーション ==== */
+.top-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 12px 8px;
+  flex-shrink: 0;
+}
+
+.top-tabs button {
+  flex: 1;
+  background: #182420;
+  color: #9fb3ac;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.top-tabs button.active {
+  background: #0f6e56;
+  color: #fff;
+}
+
+.settings-panel,
+.hints-panel {
+  padding: 4px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+}
+
+.settings-panel label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #9fb3ac;
+}
+
+.settings-panel select {
+  background: #182420;
+  color: #e8ece9;
+  border: 1px solid #2a3d37;
+  border-radius: 8px;
+  padding: 8px;
+  font-size: 14px;
+}
+
+.settings-note {
+  font-size: 12px;
+  color: #6f8a82;
+}
+
+.hints-panel ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.hints-panel li {
+  background: #12312a;
+  color: #7de3bc;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
+/* ==== PIP表示(ストリートビュー/地図の切り替え) ==== */
+.stage {
+  flex: 1;
+  position: relative;
+  padding: 0 12px;
+  min-height: 0;
+}
+
+.pane {
+  position: absolute;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid #2a3d37;
+  background: #000;
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+
+.pane.focused {
+  top: 0;
+  bottom: 0;
+  left: 12px;
+  right: 12px;
+  z-index: 1;
+  cursor: default;
+}
+
+.pane.pip {
+  width: 38%;
+  height: 30%;
+  max-width: 220px;
+  max-height: 160px;
+  left: 12px;
+  bottom: 8px;
+  z-index: 2;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+
+.pip-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+}
+
+.pane-tabs {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 4;
+  display: flex;
+  gap: 4px;
+}
+
+.pane-tabs span {
+  background: rgba(11, 18, 16, 0.8);
+  color: #9fb3ac;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.pane-tabs span.active {
+  background: #0f6e56;
+  color: #fff;
+}
+
+.street-loading {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #9fb3ac;
+  font-size: 12px;
+  text-align: center;
+  padding: 12px;
+}
+
+/* ==== 地図レイヤー切替ボタン ==== */
+.layer-toggle {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  z-index: 500;
+  background: rgba(11, 18, 16, 0.85);
+  color: #e8ece9;
+  border: 1px solid #2a3d37;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.explore-btn {
+  width: 100%;
+  background: #182420;
+  color: #7de3bc;
+  border: 1px solid #2a3d37;
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 13px;
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+
+/* ==== 広告バー ==== */
+.app-shell {
+  height: calc(100dvh - 50px);
+}
+
+.ad-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  min-height: 50px;
+  z-index: 100;
+  background: #0b1210;
+  border-top: 1px solid #2a3d37;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: visible;
+}
+
+.ad-mobile-slot {
+  display: none;
+}
+.ad-pc-slot {
+  display: flex;
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .ad-mobile-slot {
+    display: block;
+  }
+  .ad-pc-slot {
+    display: none;
+  }
 }

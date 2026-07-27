@@ -8,7 +8,6 @@ compatibility_flags = ["nodejs_compat"]
 name = "GAME_ROOM"
 class_name = "GameRoom"
 
-# SQLiteバックエンドを指定することでWorkers Freeプランでも利用可能
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["GameRoom"]
@@ -24,8 +23,6 @@ database_id = "6c195eb5-8d6b-4702-b951-977ffe751ef8"
 binding = "SESSIONS"
 id = "390f220348f446fd9bee7bd6e5734864"
 
-# --- CORS用に許可するフロントエンドのオリジン ---
+# --- CORS ---
 [vars]
 ALLOWED_ORIGIN = "https://geochase.pages.dev,http://localhost:5173"
-# 本番デプロイ後、Cloudflare Pagesの発行URLに書き換えるか
-# ダッシュボードの環境変数で上書きしてください
