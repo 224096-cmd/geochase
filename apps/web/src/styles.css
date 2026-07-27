@@ -1,7 +1,13 @@
 /* ==========================================================================
    GeoChase — 追跡計器をモチーフにした暗色UI
-   数値（時間・距離・スコア・座標）はすべて等幅＋タブラー数字にして、
-   カウントダウン中に桁がガタつかないようにしている。
+
+   レイアウト方針（v2で全面的に見直し）:
+   - 高さは body > #root > .app > .layout > .stage の flex チェーンで通す。
+     grid-template-rows は「表示されない子がある」と行がズレて画面が飛ぶため使わない。
+   - 100dvh はスマホでツールバーが出入りするたびに伸縮するので 100svh を使う。
+   - 計器バーは常時表示、結果バナーは stage の上に重ねる。
+     どちらも高さを変えないので、操作しても表示位置がずれない。
+   - 広告バーは position:fixed をやめて body の flex 子にする（必ず見える）。
    ========================================================================== */
 
 :root {
@@ -24,7 +30,7 @@
 
   --radius: 12px;
   --radius-sm: 8px;
-  --ad-h: 52px;
+  --ad-h: 60px;
   --tap: 44px;
 }
 
@@ -32,15 +38,29 @@
   box-sizing: border-box;
 }
 
-html,
+html {
+  height: 100%;
+}
+
 body {
   margin: 0;
-  height: 100%;
+  height: 100vh;
+  height: 100svh; /* ツールバーの出入りで高さが変わらないよう svh を使う */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--ink);
   color: var(--text);
   font-family: var(--font-ui);
   -webkit-text-size-adjust: 100%;
   overscroll-behavior: none;
+}
+
+#root {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 button,
@@ -72,15 +92,40 @@ code {
   white-space: nowrap;
 }
 
-/* ---------- 全体の骨格 ---------- */
+/* ---------- 骨格 ---------- */
 
 .app {
-  display: grid;
-  grid-template-rows: auto auto auto 1fr auto;
-  height: 100dvh;
-  padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
-  padding-bottom: var(--ad-h);
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
+  padding-top: env(safe-area-inset-top);
+}
+
+.topbar,
+.readout,
+.actionbar {
+  flex: 0 0 auto;
+}
+
+.layout {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+}
+
+.sidebar {
+  flex: 0 0 auto;
+  position: relative;
+  background: var(--surface);
 }
 
 /* ---------- ヘッダー ---------- */
@@ -88,9 +133,10 @@ code {
 .topbar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
+  gap: 10px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--line-soft);
+  min-height: 52px;
 }
 
 .brand {
@@ -118,9 +164,10 @@ code {
 }
 
 .brand-name {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 700;
   letter-spacing: 0.04em;
+  white-space: nowrap;
 }
 
 .topbar-meta {
@@ -147,18 +194,9 @@ code {
   background: var(--muted);
 }
 
-.link-online {
-  background: var(--signal);
-}
-
-.link-connecting {
-  background: var(--warn);
-  animation: pulse 1.2s ease-in-out infinite;
-}
-
-.link-offline {
-  background: var(--hot);
-}
+.link-online { background: var(--signal); }
+.link-connecting { background: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
+.link-offline { background: var(--hot); }
 
 .topbar-actions {
   display: flex;
@@ -174,17 +212,16 @@ code {
   color: #fff;
   border: none;
   border-radius: var(--radius-sm);
-  padding: 10px 16px;
-  min-height: var(--tap);
+  padding: 9px 16px;
+  min-height: 40px;
   font-size: 14px;
   font-weight: 700;
   cursor: pointer;
+  white-space: nowrap;
   transition: background 0.15s ease;
 }
 
-.primary-btn:hover:not(:disabled) {
-  background: #12866a;
-}
+.primary-btn:hover:not(:disabled) { background: #12866a; }
 
 .primary-btn:disabled {
   background: var(--surface-2);
@@ -198,26 +235,19 @@ code {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   padding: 9px 14px;
-  min-height: 38px;
+  min-height: 40px;
   font-size: 13px;
   cursor: pointer;
+  white-space: nowrap;
   transition: border-color 0.15s ease;
 }
 
-.ghost-btn:hover:not(:disabled) {
-  border-color: var(--brand);
-}
+.ghost-btn:hover:not(:disabled) { border-color: var(--brand); }
+.ghost-btn:disabled { color: #5d7871; cursor: not-allowed; }
 
-.ghost-btn:disabled {
-  color: #5d7871;
-  cursor: not-allowed;
-}
+.wide { width: 100%; }
 
-.wide {
-  width: 100%;
-}
-
-/* ---------- 計器バー（このUIの主役） ---------- */
+/* ---------- 計器バー（常時表示・高さ固定） ---------- */
 
 .readout {
   display: flex;
@@ -229,36 +259,39 @@ code {
 
 .readout-cell {
   position: relative;
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
+  justify-content: center;
   gap: 2px;
-  padding: 8px 12px 10px;
+  padding: 7px 10px 9px;
   background: var(--surface);
   overflow: hidden;
 }
 
 .readout-label {
   font-size: 10px;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.1em;
   color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .readout-value {
   font-family: var(--font-data);
   font-variant-numeric: tabular-nums;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 600;
   line-height: 1.1;
   color: var(--text);
+  white-space: nowrap;
 }
 
-.readout-sub {
-  font-size: 12px;
-  color: var(--muted);
-}
+.readout-value.is-empty { color: #4a635b; }
+.readout-sub { font-size: 12px; color: var(--muted); }
 
-/* 時間の残量を下端のバーで示す。数字より先に色で気づけるようにする */
 .readout-bar {
   position: absolute;
   left: 0;
@@ -270,154 +303,88 @@ code {
   transition: transform 0.25s linear, background 0.3s ease;
 }
 
-.readout[data-urgency="warn"] .readout-timer .readout-value {
-  color: var(--warn);
-}
+.readout[data-urgency="warn"] .readout-timer .readout-value { color: var(--warn); }
+.readout[data-urgency="warn"] .readout-bar { background: var(--warn); }
+.readout[data-urgency="critical"] .readout-timer .readout-value { color: var(--hot); }
+.readout[data-urgency="critical"] .readout-bar { background: var(--hot); }
 
-.readout[data-urgency="warn"] .readout-bar {
-  background: var(--warn);
-}
-
-.readout[data-urgency="critical"] .readout-timer .readout-value {
-  color: var(--hot);
-}
-
-.readout[data-urgency="critical"] .readout-bar {
-  background: var(--hot);
-}
-
-.badge {
-  align-self: center;
-  margin-inline: 12px;
-  padding: 4px 10px;
-  border: 1px solid var(--signal);
-  border-radius: 999px;
-  font-size: 11px;
-  color: var(--signal);
-  background: var(--surface);
-}
-
-/* ---------- 結果表示 ---------- */
-
-.result {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding: 10px 14px;
-  font-size: 14px;
-  border-bottom: 1px solid var(--line-soft);
-}
-
-.result strong {
-  font-weight: 700;
-}
-
-.result-sub {
-  font-family: var(--font-data);
-  font-variant-numeric: tabular-nums;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.result.is-correct {
-  background: #10261f;
-  color: var(--signal);
-}
-
-.result.is-miss {
-  background: #241614;
-  color: #f3b0aa;
-}
-
-/* ---------- レイアウト ---------- */
-
-.layout {
-  display: grid;
-  grid-template-columns: 1fr;
-  min-height: 0;
-}
-
-.stage {
-  position: relative;
-  min-height: 0;
-  padding: 10px 12px;
-}
+/* ---------- ステージ（映像＋地図） ---------- */
 
 .pane {
+  position: relative;
+  min-height: 0;
   border-radius: var(--radius);
   overflow: hidden;
   border: 1px solid var(--line);
   background: #000;
 }
 
-/* 小窓(PIP)配置は 899px 以下だけに閉じ込める。
-   PC側で打ち消そうとすると .stage[data-focus="..."] .pane-map (詳細度 0,3,0) に
-   .stage .pane (0,2,0) が負けるため、そもそも適用範囲を分ける。 */
-@media (max-width: 899px) {
-  .pane {
-    position: absolute;
-    transition: inset 0.22s ease, width 0.22s ease, height 0.22s ease;
-  }
-
-  /* 主表示 */
-  .stage[data-focus="street"] .pane-street,
-  .stage[data-focus="map"] .pane-map {
-    inset: 10px 12px;
-    z-index: 1;
-  }
-
-  /* 小窓表示 */
-  .stage[data-focus="street"] .pane-map,
-  .stage[data-focus="map"] .pane-street {
-    left: 20px;
-    bottom: 20px;
-    width: 38%;
-    height: 30%;
-    max-width: 210px;
-    max-height: 150px;
-    z-index: 2;
-    cursor: pointer;
-    box-shadow: 0 6px 20px rgb(0 0 0 / 55%);
-  }
-
-  /* 小窓側は中身を操作させない（誤タップで地図にピンが立つのを防ぐ） */
-  .stage[data-focus="street"] .pane-map > *,
-  .stage[data-focus="map"] .pane-street > * {
-    pointer-events: none;
-  }
-}
-
-.swap-btn {
+/* 結果は stage に重ねる。流し込むとレイアウトが動いて画面が飛ぶため */
+.result {
   position: absolute;
-  right: 20px;
-  bottom: 20px;
-  z-index: 3;
-  background: rgb(7 12 11 / 82%);
-  color: var(--text);
-  border: 1px solid var(--line);
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  max-width: min(92%, 520px);
+  padding: 9px 16px;
   border-radius: 999px;
-  padding: 8px 14px;
-  min-height: 38px;
-  font-size: 12px;
-  cursor: pointer;
-  backdrop-filter: blur(6px);
+  font-size: 13px;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 55%);
+  pointer-events: none;
 }
+
+.result strong { font-weight: 700; }
+
+.result-sub {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.result.is-correct { background: #12362c; color: var(--signal); border: 1px solid #1f5a49; }
+.result.is-miss { background: #33201d; color: #f3b0aa; border: 1px solid #5a2f2a; }
+
+/* 小窓（PIP） */
+.pip-label {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgb(7 12 11 / 85%);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+/* ---------- ペイン内の操作（各画面の端に固定） ---------- */
 
 .pane-tabs {
   position: absolute;
   top: 8px;
   left: 8px;
-  z-index: 4;
+  z-index: 5;
   display: flex;
   gap: 4px;
 }
 
 .pane-tabs button {
-  background: rgb(7 12 11 / 82%);
+  background: rgb(7 12 11 / 85%);
   color: var(--muted);
   border: 1px solid var(--line);
   border-radius: 999px;
-  padding: 5px 11px;
+  padding: 6px 12px;
+  min-height: 32px;
   font-size: 11px;
   cursor: pointer;
 }
@@ -437,10 +404,7 @@ code {
   background: #000;
 }
 
-.street-canvas {
-  width: 100%;
-  height: 100%;
-}
+.street-canvas { width: 100%; height: 100%; }
 
 .street-fallback {
   position: absolute;
@@ -465,16 +429,8 @@ code {
   background: var(--surface);
 }
 
-.street-message p {
-  margin: 0;
-  max-width: 34ch;
-  line-height: 1.6;
-}
-
-.street-message-title {
-  color: var(--text);
-  font-weight: 600;
-}
+.street-message p { margin: 0; max-width: 34ch; line-height: 1.6; }
+.street-message-title { color: var(--text); font-weight: 600; }
 
 .street-spinner {
   width: 22px;
@@ -485,99 +441,103 @@ code {
   animation: spin 0.9s linear infinite;
 }
 
+/* 映像側の操作は右上に固める */
 .street-btn {
   position: absolute;
   right: 8px;
   top: 8px;
-  z-index: 4;
-  background: rgb(7 12 11 / 82%);
+  z-index: 5;
+  background: rgb(7 12 11 / 85%);
   color: var(--text);
   border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: 6px 10px;
+  border-radius: 999px;
+  padding: 6px 12px;
+  min-height: 32px;
   font-size: 11px;
   cursor: pointer;
 }
 
 /* ---------- 地図 ---------- */
 
-.map-wrap {
-  position: relative;
-  width: 100%;
-  height: 100%;
-}
+.map-wrap { position: relative; width: 100%; height: 100%; }
+.map-canvas { width: 100%; height: 100%; }
 
-.map-canvas {
-  width: 100%;
-  height: 100%;
-}
-
-.leaflet-container {
-  background: #0b1210;
-  font-family: var(--font-ui);
-}
+.leaflet-container { background: #0b1210; font-family: var(--font-ui); }
 
 .leaflet-control-attribution {
   background: rgb(7 12 11 / 78%) !important;
   color: var(--muted) !important;
-  font-size: 10px !important;
+  font-size: 9px !important;
+  padding: 1px 5px !important;
 }
 
-.leaflet-control-attribution a {
-  color: var(--muted) !important;
+.leaflet-control-attribution a { color: var(--muted) !important; }
+
+.leaflet-control-zoom a {
+  background: rgb(7 12 11 / 88%) !important;
+  color: var(--text) !important;
+  border-color: var(--line) !important;
+  width: 34px !important;
+  height: 34px !important;
+  line-height: 32px !important;
 }
 
+/* 小窓のときは地図の操作系を丸ごと隠す */
+.map-wrap.is-compact .leaflet-control-container,
+.map-wrap.is-compact .map-controls,
+.map-wrap.is-compact .map-lock-note {
+  display: none;
+}
+
+/* 地図側の操作は左下に固める（小窓は右下なので重ならない） */
 .map-controls {
   position: absolute;
   left: 8px;
-  bottom: 8px;
+  bottom: 22px;
   z-index: 500;
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
+  max-width: calc(100% - 16px);
 }
 
 .map-btn {
-  background: rgb(7 12 11 / 88%);
+  background: rgb(7 12 11 / 90%);
   color: var(--text);
   border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: 7px 11px;
+  border-radius: 999px;
+  padding: 8px 13px;
+  min-height: 36px;
   font-size: 12px;
   cursor: pointer;
+  white-space: nowrap;
 }
 
-.map-btn[aria-pressed="true"] {
-  border-color: var(--brand);
-  color: var(--signal);
-}
+.map-btn[aria-pressed="true"] { border-color: var(--brand); color: var(--signal); }
+.map-btn.is-accent { border-color: var(--brand); color: var(--signal); }
+.map-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .map-lock-note {
   position: absolute;
   top: 8px;
-  right: 8px;
+  left: 8px;
   z-index: 500;
   background: rgb(7 12 11 / 85%);
   border: 1px solid var(--line);
   border-radius: 999px;
-  padding: 4px 10px;
+  padding: 5px 11px;
   font-size: 11px;
   color: var(--muted);
+  pointer-events: none;
 }
 
 /* ---------- サイドパネル ---------- */
 
-.sidebar {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  border-top: 1px solid var(--line-soft);
-  background: var(--surface);
-}
-
 .panel-tabs {
   display: flex;
   gap: 6px;
-  padding: 8px 12px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--line-soft);
 }
 
 .panel-tabs button {
@@ -586,36 +546,27 @@ code {
   color: var(--muted);
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  padding: 9px 4px;
+  padding: 8px 4px;
   min-height: 38px;
   font-size: 12px;
   cursor: pointer;
+  white-space: nowrap;
 }
 
-.panel-tabs button.is-active {
-  background: var(--brand);
-  color: #fff;
-}
+.panel-tabs button.is-active { background: var(--brand); color: #fff; }
 
-.panel-body {
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-}
-
-.app[data-panel="none"] .panel-body {
-  display: none;
-}
+.panel-body { display: none; }
 
 .panel {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 4px 12px 16px;
+  padding: 12px;
 }
 
 .panel h2 {
   margin: 0;
-  font-size: 12px;
+  font-size: 11px;
   letter-spacing: 0.14em;
   color: var(--muted);
   font-weight: 600;
@@ -629,34 +580,23 @@ code {
   color: var(--muted);
 }
 
-.field select {
+.field select,
+.field input {
   background: var(--surface-2);
   color: var(--text);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   padding: 10px;
   min-height: var(--tap);
-  font-size: 14px;
+  font-size: 15px;
 }
 
-.field select:disabled {
-  opacity: 0.5;
-}
+.field select:disabled { opacity: 0.5; }
 
-.note {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.6;
-  color: #6f8a82;
-}
+.room-join { display: flex; gap: 6px; }
+.room-join input { flex: 1; min-width: 0; font-family: var(--font-data); }
 
-.room-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  flex-wrap: wrap;
-}
+.note { margin: 0; font-size: 12px; line-height: 1.6; color: #6f8a82; }
 
 .hint-list {
   margin: 0;
@@ -685,7 +625,7 @@ code {
 
 .history-list li {
   display: grid;
-  grid-template-columns: 42px 1fr auto;
+  grid-template-columns: 40px 1fr auto;
   align-items: center;
   gap: 8px;
   padding: 9px 10px;
@@ -694,11 +634,7 @@ code {
   font-size: 13px;
 }
 
-.history-round {
-  font-family: var(--font-data);
-  color: var(--muted);
-  font-size: 12px;
-}
+.history-round { font-family: var(--font-data); color: var(--muted); font-size: 12px; }
 
 .history-distance {
   font-family: var(--font-data);
@@ -713,32 +649,22 @@ code {
   font-weight: 600;
 }
 
-.panel-scrim {
-  display: none;
-}
-
 /* ---------- 操作バー ---------- */
 
 .actionbar {
   display: flex;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border-top: 1px solid var(--line-soft);
   background: var(--surface);
 }
 
 /* ---------- 補助 ---------- */
 
-.install-wrap {
-  position: relative;
-}
+.install-wrap { position: relative; }
 
 .install-help {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 6px);
-  z-index: 60;
-  width: 230px;
+  margin-top: 6px;
   background: var(--surface-2);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
@@ -746,15 +672,14 @@ code {
   font-size: 12px;
   line-height: 1.6;
   color: var(--text);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
 }
 
 .toast {
   position: fixed;
   left: 50%;
-  bottom: calc(var(--ad-h) + 78px);
+  bottom: calc(var(--ad-h) + 76px);
   transform: translateX(-50%);
-  z-index: 200;
+  z-index: 300;
   max-width: min(92vw, 420px);
   background: var(--surface-2);
   border: 1px solid var(--line);
@@ -769,17 +694,11 @@ code {
   margin: 0 auto;
   padding: 48px 20px;
   line-height: 1.7;
+  overflow-y: auto;
 }
 
-.setup-screen h1 {
-  color: var(--signal);
-  font-size: 20px;
-}
-
-.setup-title {
-  font-weight: 700;
-  font-size: 16px;
-}
+.setup-screen h1 { color: var(--signal); font-size: 20px; }
+.setup-title { font-weight: 700; font-size: 16px; }
 
 .setup-screen pre {
   background: var(--surface-2);
@@ -791,172 +710,177 @@ code {
   font-size: 13px;
 }
 
-/* ---------- 広告枠 ---------- */
+/* ---------- 広告枠 ----------
+   実測したユニットサイズに合わせて置き場所を変える。
+   ・スマホ(320x50) → 下部バー。bodyのflex子なので必ず見える
+   ・PC 300x250     → 右パネル下に固定。サイドバーに余白を確保して重ならないようにする
+   ・PC 160x600     → 1240px以上のときだけ右端の縦帯。app全体に余白を作って避ける
+   下部バーに300x250や160x600を入れるとゲーム画面を潰すので入れない。 */
 
 .ad-bar {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: var(--ad-h);
-  z-index: 100;
+  flex: 0 0 auto;
+  min-height: var(--ad-h);
+  padding-bottom: env(safe-area-inset-bottom);
   background: var(--ink);
   border-top: 1px solid var(--line-soft);
   display: flex;
   align-items: center;
   justify-content: center;
-  overflow: hidden;
 }
 
-.ad-mobile-slot {
+#ad-sp {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 50px;
+}
+
+/* PC用は既定で非表示。fixedにするので flow には影響しない */
+#ad-pc-rect,
+#ad-pc-sky {
   display: none;
 }
 
-.ad-pc-slot {
-  display: flex;
-  gap: 8px;
-}
-
 /* ==========================================================================
-   スマートフォン（〜640px）
+   〜899px: 映像と地図を切り替え表示（小窓は右下固定）
    ========================================================================== */
 
-@media (max-width: 640px) {
-  .ad-mobile-slot {
+@media (max-width: 899px) {
+  .stage[data-focus="street"] .pane-street,
+  .stage[data-focus="map"] .pane-map {
+    position: absolute;
+    inset: 8px;
+    z-index: 1;
+  }
+
+  .stage[data-focus="street"] .pane-map,
+  .stage[data-focus="map"] .pane-street {
+    position: absolute;
+    right: 14px;
+    bottom: 14px;
+    width: 34%;
+    max-width: 170px;
+    aspect-ratio: 4 / 3;
+    height: auto;
+    z-index: 4;
+    cursor: pointer;
+    box-shadow: 0 6px 20px rgb(0 0 0 / 60%);
+  }
+
+  /* 小窓の中身は触らせない（誤タップで地図にピンが立つのを防ぐ） */
+  .stage[data-focus="street"] .pane-map > *,
+  .stage[data-focus="map"] .pane-street > * {
+    pointer-events: none;
+  }
+
+  /* パネルはタブ帯の真上に開く。タブ帯の高さは変わらないので画面が動かない */
+  .app:not([data-panel="none"]) .panel-body {
     display: block;
-  }
-
-  .ad-pc-slot {
-    display: none;
-  }
-
-  .brand-name {
-    font-size: 15px;
-  }
-
-  .link-label {
-    display: none;
-  }
-
-  .readout-value {
-    font-size: 17px;
-  }
-
-  /* パネルは下から出るシートにして、地図と映像の面積を確保する */
-  .app[data-panel="settings"] .sidebar,
-  .app[data-panel="hints"] .sidebar,
-  .app[data-panel="history"] .sidebar {
-    position: fixed;
+    position: absolute;
+    bottom: 100%;
     left: 0;
     right: 0;
-    bottom: var(--ad-h);
     z-index: 150;
-    max-height: 62dvh;
+    max-height: 58svh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    background: var(--surface);
     border-top: 1px solid var(--line);
     border-radius: var(--radius) var(--radius) 0 0;
-    box-shadow: 0 -10px 30px rgb(0 0 0 / 55%);
-  }
-
-  .app:not([data-panel="none"]) .panel-scrim {
-    display: block;
-    position: fixed;
-    inset: 0;
-    z-index: 140;
-    border: none;
-    background: rgb(0 0 0 / 45%);
+    box-shadow: 0 -10px 30px rgb(0 0 0 / 60%);
   }
 }
 
+@media (max-width: 400px) {
+  .brand-name { display: none; }
+  .link-label { display: none; }
+  .readout-value { font-size: 16px; }
+}
+
 /* ==========================================================================
-   タブレット・PC（900px〜）: 映像と地図を並べ、パネルは常時表示
+   900px〜: 映像と地図を左右に並べ、パネルは右側に常時表示
    ========================================================================== */
 
 @media (min-width: 900px) {
-  :root {
-    --ad-h: 60px;
+  /* PCではスマホ用バナーを出さないので下部バーごと消す */
+  .ad-bar { display: none; }
+
+  #ad-pc-rect {
+    display: block;
+    position: fixed;
+    right: 10px;
+    bottom: 66px;
+    z-index: 90;
   }
 
-  .layout {
-    grid-template-columns: minmax(0, 1fr) 320px;
-    gap: 0;
-  }
+  /* 固定した300x250の下にパネルが潜り込まないよう余白を確保 */
+  .sidebar { padding-bottom: 266px; }
 
-  /* 映像と地図を並べる。小窓化のルールはモバイル用クエリ側にしか無いので打ち消し不要 */
+  .layout { flex-direction: row; }
+
   .stage {
     display: grid;
-    grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
     gap: 10px;
-    padding: 12px;
-    position: static;
-  }
-
-  .swap-btn {
-    display: none;
+    padding: 10px;
   }
 
   .sidebar {
-    border-top: none;
+    width: 320px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
     border-left: 1px solid var(--line-soft);
   }
 
-  .app[data-panel="none"] .panel-body {
+  .panel-tabs { order: -1; border-top: none; border-bottom: 1px solid var(--line-soft); }
+
+  .panel-body {
     display: block;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
   }
 
-  /* PCでは常にどれか1つのパネルを開いておく */
-  .app[data-panel="none"] .panel-body::before {
-    content: "上のタブから設定・ヒント・記録を開けます。";
+  .actionbar { justify-content: flex-end; }
+  .actionbar .wide { width: auto; min-width: 280px; }
+
+  .toast { bottom: calc(var(--ad-h) + 88px); }
+}
+
+/* 横に余裕がある画面だけ、右端にスカイスクレイパーを立てる */
+@media (min-width: 1240px) {
+  .app { padding-right: 176px; }
+
+  #ad-pc-sky {
     display: block;
-    padding: 12px;
-    font-size: 12px;
-    line-height: 1.6;
-    color: #6f8a82;
+    position: fixed;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 90;
   }
 
-  .actionbar {
-    justify-content: flex-end;
-  }
-
-  .actionbar .wide {
-    width: auto;
-    min-width: 260px;
-  }
-
-  .toast {
-    bottom: calc(var(--ad-h) + 90px);
-  }
+  #ad-pc-rect { right: 186px; }
 }
 
 @media (min-width: 1400px) {
-  .layout {
-    grid-template-columns: minmax(0, 1fr) 360px;
-  }
+  .sidebar { width: 360px; }
 }
 
 /* ==========================================================================
    アニメーション
    ========================================================================== */
 
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 @keyframes pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
+  *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;

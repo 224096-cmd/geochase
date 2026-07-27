@@ -5,8 +5,10 @@ interface Props {
   imageId: string;
   /** mapillary-jsが失敗したときに表示する静止画URL */
   imageUrl?: string;
-  /** 画像が見えるようになったら1回だけ呼ばれる */
+  /** 画像が見えるようになったら呼ばれる */
   onReady?: () => void;
+  /** 小窓表示中。操作系を隠す */
+  compact?: boolean;
 }
 
 const MAPILLARY_TOKEN = import.meta.env.VITE_MAPILLARY_TOKEN as string | undefined;
@@ -15,7 +17,7 @@ const LOAD_TIMEOUT_MS = 12_000;
 
 type Phase = "empty" | "loading" | "ready" | "fallback" | "failed";
 
-export default function StreetView({ imageId, imageUrl, onReady }: Props) {
+export default function StreetView({ imageId, imageUrl, onReady, compact = false }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
   const [phase, setPhase] = useState<Phase>("empty");
@@ -24,15 +26,14 @@ export default function StreetView({ imageId, imageUrl, onReady }: Props) {
   onReadyRef.current = onReady;
 
   useEffect(() => {
-    if (!MAPILLARY_TOKEN) return;
-    if (!containerRef.current) return;
+    if (!MAPILLARY_TOKEN || !containerRef.current) return;
 
     if (!imageId) {
       setPhase("empty");
       return;
     }
 
-    // 前の画像の「表示済み」状態を持ち越さない（旧実装ではローディング表示が二度と出なかった）
+    // 前の画像の「表示済み」状態を持ち越さない
     setPhase("loading");
 
     let cancelled = false;
@@ -58,7 +59,7 @@ export default function StreetView({ imageId, imageUrl, onReady }: Props) {
           viewerRef.current = new Viewer({
             accessToken: MAPILLARY_TOKEN,
             container: containerRef.current,
-            // ここでimageIdを渡すと失敗を捕捉できないので、必ずmoveToで移動する
+            // コンストラクタにimageIdを渡すと失敗を捕捉できないので、必ずmoveToで移動する
             component: { cover: false },
           });
         }
@@ -82,6 +83,18 @@ export default function StreetView({ imageId, imageUrl, onReady }: Props) {
     };
   }, [imageId, imageUrl]);
 
+  /* 小窓⇔全画面でコンテナのサイズが変わるので、ビューアに再計測させる */
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      try {
+        viewerRef.current?.resize?.();
+      } catch {
+        /* 未初期化 */
+      }
+    }, 260);
+    return () => window.clearTimeout(t);
+  }, [compact]);
+
   useEffect(
     () => () => {
       viewerRef.current?.remove?.();
@@ -96,7 +109,7 @@ export default function StreetView({ imageId, imageUrl, onReady }: Props) {
       viewerRef.current?.setCenter([0.5, 0.5]);
       viewerRef.current?.setZoom(0);
     } catch {
-      /* ビューア未初期化 */
+      /* 未初期化 */
     }
   }, []);
 
@@ -113,11 +126,13 @@ export default function StreetView({ imageId, imageUrl, onReady }: Props) {
 
   return (
     <div className="street-wrap">
-      <div ref={containerRef} className="street-canvas" style={{ visibility: phase === "ready" ? "visible" : "hidden" }} />
+      <div
+        ref={containerRef}
+        className="street-canvas"
+        style={{ visibility: phase === "ready" ? "visible" : "hidden" }}
+      />
 
-      {phase === "fallback" && imageUrl && (
-        <img className="street-fallback" src={imageUrl} alt="現在地のストリート画像" />
-      )}
+      {phase === "fallback" && imageUrl && <img className="street-fallback" src={imageUrl} alt="現在地のストリート画像" />}
 
       {phase === "loading" && (
         <div className="street-message">
@@ -135,11 +150,11 @@ export default function StreetView({ imageId, imageUrl, onReady }: Props) {
       {phase === "failed" && (
         <div className="street-message">
           <p className="street-message-title">画像を取得できませんでした</p>
-          <p>この地点には見られる画像がありません。地図のヒントだけで推理してください。</p>
+          <p>この地点には見られる画像がありません。地図とヒントで推理してください。</p>
         </div>
       )}
 
-      {phase === "ready" && (
+      {phase === "ready" && !compact && (
         <button type="button" className="street-btn" onClick={resetView}>
           視点を戻す
         </button>
