@@ -6,10 +6,6 @@ const FETCH_TIMEOUT_MS = 8000;
 
 /* ------------------------------------------------------------------ *
  * 「遊べる地点」の条件
- *
- * ここを満たさない地点は採用しない。
- * これが無いと、写真が1〜2枚しか無い袋小路に出て
- * 「少ししか動けない・視点も回せない」状態になる。
  * ------------------------------------------------------------------ */
 
 /** 密度を測る半径(km)。この中に何枚あるかで「歩き回れるか」を判断する */
@@ -22,32 +18,26 @@ const MIN_SEQUENCE_LENGTH = 8;
 /* ------------------------------------------------------------------ *
  * 画質の条件
  *
- * Mapillaryは投稿型なので、2013年頃のガラケー画質から
- * 最新の8K 360度カメラまで玉石混交。看板を読ませたいなら
- * 「解像度」と「撮影年」で足切りするのがいちばん効く。
+ * 「鮮明な写真を探す」ボタンを廃止したぶん、最初から高解像度だけを
+ * 引くように基準を1段引き上げてある。
  * ------------------------------------------------------------------ */
 
-/** 採用条件を段階的にゆるめる。上から順に試し、見つかった時点で採用する */
 interface QualityTier {
   label: string;
-  /** 360度パノラマ必須か */
   pano: boolean;
-  /** 元画像の最低横ピクセル数 */
   minWidth: number;
-  /** 何年前までの撮影を許容するか（0 = 制限なし） */
   freshYears: number;
-  /** 周囲の画像密度・シーケンス長の条件を課すか */
   walkable: boolean;
 }
 
 const QUALITY_TIERS: QualityTier[] = [
   // 5760x2880 = Insta360 X3 / GoPro Max クラス。看板がはっきり読める
-  { label: "best", pano: true, minWidth: 5760, freshYears: 5, walkable: true },
-  { label: "good", pano: true, minWidth: 4096, freshYears: 8, walkable: true },
-  { label: "fair", pano: true, minWidth: 2048, freshYears: 12, walkable: true },
+  { label: "best", pano: true, minWidth: 5760, freshYears: 6, walkable: true },
+  { label: "good", pano: true, minWidth: 4096, freshYears: 10, walkable: true },
+  { label: "fair", pano: true, minWidth: 3000, freshYears: 14, walkable: true },
   // ここから平面写真も許容
-  { label: "flat", pano: false, minWidth: 2560, freshYears: 10, walkable: true },
-  { label: "any-walkable", pano: false, minWidth: 1600, freshYears: 0, walkable: true },
+  { label: "flat", pano: false, minWidth: 3000, freshYears: 12, walkable: true },
+  { label: "any-walkable", pano: false, minWidth: 2048, freshYears: 0, walkable: true },
   // 最後の妥協。何も見つからないよりはマシ
   { label: "any", pano: false, minWidth: 0, freshYears: 0, walkable: false },
 ];
@@ -57,42 +47,200 @@ const YEAR_MS = 365.25 * 24 * 60 * 60 * 1000;
 // [minLng, minLat, maxLng, maxLat]
 type Bbox = [number, number, number, number];
 
-// scaleKm はスコア計算に使う「そのエリアの目安サイズ(km)」。
-// 狭いエリアほど小さくすることで、範囲を絞ったときに満点が出にくくなる。
-export const REGION_DEFS: Record<RegionKey, { label: string; bboxes: Bbox[]; scaleKm: number }> = {
-  hokkaido: { label: "北海道", bboxes: [[139.3, 41.0, 145.8, 45.6]], scaleKm: 600 },
-  tohoku: { label: "東北", bboxes: [[139.3, 36.8, 141.9, 41.6]], scaleKm: 500 },
-  kanto: { label: "関東", bboxes: [[138.3, 34.8, 140.9, 37.2]], scaleKm: 300 },
-  chubu: { label: "中部", bboxes: [[135.9, 34.6, 139.9, 38.0]], scaleKm: 450 },
-  kinki: { label: "近畿", bboxes: [[134.7, 33.4, 136.5, 35.8]], scaleKm: 300 },
-  chugoku: { label: "中国", bboxes: [[130.8, 33.7, 134.5, 35.8]], scaleKm: 400 },
-  shikoku: { label: "四国", bboxes: [[132.0, 32.7, 134.8, 34.6]], scaleKm: 300 },
-  kyushu_okinawa: { label: "九州・沖縄", bboxes: [[122.9, 24.0, 131.3, 34.0]], scaleKm: 900 },
-  japan_wide: { label: "日本全国", bboxes: [[122.9, 24.0, 145.8, 45.6]], scaleKm: 2000 },
-  world: {
-    label: "世界",
-    scaleKm: 15000,
+/**
+ * hintLevel = 最初に出すヒントの粒度。
+ *   0 … 国から出す（世界）
+ *   1 … 都道府県・州から出す（国や地方を指定済み＝国は自明）
+ *   2 … 市区町村から出す（都道府県を指定済み）
+ */
+interface RegionDef {
+  label: string;
+  group: string;
+  bboxes: Bbox[];
+  scaleKm: number;
+  hintLevel: 0 | 1 | 2;
+}
+
+/**
+ * 島が散らばる地域は bbox を分割してある。
+ * 1つの大きな四角にすると海ばかり引いて、地点探索が何度も空振りするため。
+ */
+export const REGION_DEFS: Record<string, RegionDef> = {
+  /* ---------- まとめ ---------- */
+  japan_wide: { label: "日本全国", group: "まとめ", scaleKm: 2000, hintLevel: 1,
+    bboxes: [[130.0, 31.0, 141.0, 43.5], [139.0, 34.9, 140.9, 36.3], [135.0, 34.2, 136.5, 35.8], [130.2, 32.5, 131.6, 34.0]] },
+  world: { label: "世界", group: "まとめ", scaleKm: 15000, hintLevel: 0,
     bboxes: [
-      [139.4, 35.4, 140.0, 35.9], // 東京
-      [-74.3, 40.6, -73.7, 40.9], // ニューヨーク
-      [-0.4, 51.3, 0.2, 51.7], // ロンドン
-      [2.1, 48.7, 2.5, 48.98], // パリ
-      [150.9, -34.0, 151.4, -33.7], // シドニー
-      [126.8, 37.4, 127.2, 37.7], // ソウル
-      [13.2, 52.4, 13.6, 52.6], // ベルリン
-      [4.7, 52.25, 5.0, 52.45], // アムステルダム
-      [100.4, 13.6, 100.7, 13.9], // バンコク
-      [-99.25, 19.3, -99.0, 19.55], // メキシコシティ
-      [-43.4, -23.05, -43.1, -22.85], // リオデジャネイロ
-      [18.3, -34.0, 18.6, -33.85], // ケープタウン
-      [-123.3, 49.2, -122.9, 49.35], // バンクーバー
-      [12.3, 41.8, 12.6, 42.0], // ローマ
-    ],
-  },
+      [139.4, 35.4, 140.0, 35.9], [-74.3, 40.6, -73.7, 40.9], [-0.4, 51.3, 0.2, 51.7],
+      [2.1, 48.7, 2.5, 48.98], [150.9, -34.0, 151.4, -33.7], [126.8, 37.4, 127.2, 37.7],
+      [13.2, 52.4, 13.6, 52.6], [4.7, 52.25, 5.0, 52.45], [100.4, 13.6, 100.7, 13.9],
+      [-99.25, 19.3, -99.0, 19.55], [-43.4, -23.05, -43.1, -22.85], [18.3, -34.0, 18.6, -33.85],
+      [-123.3, 49.2, -122.9, 49.35], [12.3, 41.8, 12.6, 42.0], [121.4, 25.0, 121.65, 25.15],
+      [-118.5, 33.9, -118.1, 34.15], [11.4, 48.09, 11.7, 48.2], [-3.8, 40.35, -3.6, 40.5],
+    ] },
+
+  /* ---------- 地方 ---------- */
+  r_hokkaido: { label: "北海道地方", group: "地方", scaleKm: 600, hintLevel: 1,
+    bboxes: [[140.6, 42.6, 142.2, 43.6], [140.0, 41.4, 141.6, 42.6], [141.4, 43.5, 143.2, 45.5], [142.5, 42.8, 145.6, 44.4]] },
+  r_tohoku: { label: "東北地方", group: "地方", scaleKm: 500, hintLevel: 1,
+    bboxes: [[139.5, 40.2, 141.7, 41.6], [140.6, 38.7, 142.1, 40.5], [140.3, 37.7, 141.7, 39.0], [139.1, 36.8, 141.1, 38.0]] },
+  r_kanto: { label: "関東地方", group: "地方", scaleKm: 300, hintLevel: 1,
+    bboxes: [[139.0, 35.4, 140.0, 35.95], [139.6, 35.1, 140.2, 35.7], [139.7, 35.6, 140.9, 36.4], [139.2, 36.1, 140.3, 37.0]] },
+  r_chubu: { label: "中部地方", group: "地方", scaleKm: 450, hintLevel: 1,
+    bboxes: [[136.7, 34.9, 137.9, 35.4], [137.4, 34.6, 139.2, 35.5], [137.3, 35.5, 138.7, 36.8], [136.6, 36.4, 137.9, 37.1], [138.7, 37.3, 139.8, 38.3]] },
+  r_kinki: { label: "近畿地方", group: "地方", scaleKm: 300, hintLevel: 1,
+    bboxes: [[135.1, 34.3, 135.8, 34.85], [135.0, 34.6, 135.9, 35.1], [134.6, 34.6, 135.5, 35.0], [135.7, 34.9, 136.3, 35.4], [135.7, 34.4, 136.2, 34.8]] },
+  r_chugoku: { label: "中国地方", group: "地方", scaleKm: 400, hintLevel: 1,
+    bboxes: [[132.2, 34.3, 132.6, 34.5], [133.7, 34.6, 134.1, 34.8], [131.4, 34.1, 132.1, 34.3], [133.1, 35.4, 134.3, 35.6], [132.8, 35.3, 133.3, 35.5]] },
+  r_shikoku: { label: "四国地方", group: "地方", scaleKm: 300, hintLevel: 1,
+    bboxes: [[134.4, 34.0, 134.7, 34.15], [133.9, 34.2, 134.2, 34.4], [132.6, 33.7, 133.0, 33.95], [133.4, 33.4, 133.7, 33.65]] },
+  r_kyushu: { label: "九州・沖縄地方", group: "地方", scaleKm: 900, hintLevel: 1,
+    bboxes: [[130.3, 33.5, 130.6, 33.7], [130.6, 32.7, 131.0, 33.0], [130.4, 31.5, 130.7, 31.7], [131.4, 31.85, 131.6, 32.0], [127.6, 26.15, 128.0, 26.5]] },
+
+  /* ---------- 都道府県（hintLevel:2 = 市区町村から出す） ---------- */
+  hokkaido: { label: "北海道", group: "北海道・東北", scaleKm: 500, hintLevel: 2,
+    bboxes: [[140.9, 42.85, 141.7, 43.35], [140.0, 41.7, 141.0, 42.4], [141.2, 43.6, 142.0, 44.5], [143.9, 42.9, 144.6, 43.3], [144.2, 43.7, 144.5, 44.0]] },
+  aomori: { label: "青森県", group: "北海道・東北", scaleKm: 120, hintLevel: 2,
+    bboxes: [[140.6, 40.7, 140.95, 40.95], [141.3, 40.45, 141.65, 40.7], [140.4, 40.5, 140.7, 40.7]] },
+  iwate: { label: "岩手県", group: "北海道・東北", scaleKm: 150, hintLevel: 2,
+    bboxes: [[141.0, 39.6, 141.3, 39.85], [141.6, 39.55, 142.0, 39.8], [141.0, 39.0, 141.3, 39.3]] },
+  miyagi: { label: "宮城県", group: "北海道・東北", scaleKm: 110, hintLevel: 2,
+    bboxes: [[140.75, 38.2, 141.15, 38.4], [141.2, 38.35, 141.5, 38.6], [140.85, 38.0, 141.2, 38.2]] },
+  akita: { label: "秋田県", group: "北海道・東北", scaleKm: 130, hintLevel: 2,
+    bboxes: [[140.0, 39.6, 140.35, 39.85], [140.4, 39.3, 140.7, 39.55], [140.05, 40.15, 140.4, 40.35]] },
+  yamagata: { label: "山形県", group: "北海道・東北", scaleKm: 110, hintLevel: 2,
+    bboxes: [[140.2, 38.2, 140.5, 38.4], [139.8, 38.7, 140.0, 38.9], [140.0, 37.85, 140.3, 38.05]] },
+  fukushima: { label: "福島県", group: "北海道・東北", scaleKm: 130, hintLevel: 2,
+    bboxes: [[140.35, 37.7, 140.6, 37.85], [139.9, 37.45, 140.15, 37.6], [140.85, 37.0, 141.05, 37.2]] },
+
+  ibaraki: { label: "茨城県", group: "関東", scaleKm: 90, hintLevel: 2,
+    bboxes: [[140.3, 36.3, 140.6, 36.45], [140.05, 36.05, 140.3, 36.2], [140.4, 36.55, 140.7, 36.75]] },
+  tochigi: { label: "栃木県", group: "関東", scaleKm: 90, hintLevel: 2,
+    bboxes: [[139.8, 36.5, 140.1, 36.7], [139.6, 36.3, 139.9, 36.45], [139.6, 36.7, 139.85, 36.85]] },
+  gunma: { label: "群馬県", group: "関東", scaleKm: 90, hintLevel: 2,
+    bboxes: [[139.0, 36.3, 139.3, 36.45], [139.2, 36.15, 139.5, 36.3], [138.85, 36.5, 139.1, 36.7]] },
+  saitama: { label: "埼玉県", group: "関東", scaleKm: 70, hintLevel: 2,
+    bboxes: [[139.55, 35.83, 139.75, 35.95], [139.35, 35.85, 139.6, 36.0], [139.05, 35.95, 139.35, 36.12]] },
+  chiba: { label: "千葉県", group: "関東", scaleKm: 90, hintLevel: 2,
+    bboxes: [[139.95, 35.55, 140.2, 35.72], [140.05, 35.65, 140.35, 35.85], [139.85, 35.3, 140.1, 35.5]] },
+  tokyo: { label: "東京都", group: "関東", scaleKm: 45, hintLevel: 2,
+    bboxes: [[139.65, 35.63, 139.82, 35.75], [139.5, 35.65, 139.68, 35.76], [139.28, 35.68, 139.5, 35.78]] },
+  kanagawa: { label: "神奈川県", group: "関東", scaleKm: 70, hintLevel: 2,
+    bboxes: [[139.55, 35.42, 139.75, 35.56], [139.6, 35.24, 139.75, 35.37], [139.3, 35.3, 139.55, 35.45]] },
+
+  niigata: { label: "新潟県", group: "中部", scaleKm: 140, hintLevel: 2,
+    bboxes: [[138.95, 37.85, 139.2, 38.0], [138.2, 37.4, 138.5, 37.6], [139.0, 37.5, 139.3, 37.7]] },
+  toyama: { label: "富山県", group: "中部", scaleKm: 70, hintLevel: 2,
+    bboxes: [[137.15, 36.65, 137.35, 36.78], [136.95, 36.7, 137.15, 36.85], [137.2, 36.45, 137.45, 36.6]] },
+  ishikawa: { label: "石川県", group: "中部", scaleKm: 90, hintLevel: 2,
+    bboxes: [[136.6, 36.5, 136.8, 36.65], [136.8, 36.75, 137.05, 36.95], [136.9, 37.2, 137.15, 37.4]] },
+  fukui: { label: "福井県", group: "中部", scaleKm: 80, hintLevel: 2,
+    bboxes: [[136.15, 36.0, 136.35, 36.15], [136.0, 35.6, 136.2, 35.75], [135.7, 35.45, 135.95, 35.6]] },
+  yamanashi: { label: "山梨県", group: "中部", scaleKm: 70, hintLevel: 2,
+    bboxes: [[138.5, 35.62, 138.75, 35.75], [138.4, 35.5, 138.6, 35.65], [138.7, 35.45, 138.9, 35.6]] },
+  nagano: { label: "長野県", group: "中部", scaleKm: 130, hintLevel: 2,
+    bboxes: [[138.15, 36.6, 138.35, 36.75], [137.9, 36.15, 138.15, 36.3], [138.15, 35.95, 138.4, 36.1]] },
+  gifu: { label: "岐阜県", group: "中部", scaleKm: 100, hintLevel: 2,
+    bboxes: [[136.7, 35.35, 136.95, 35.5], [136.5, 35.4, 136.75, 35.55], [137.15, 36.1, 137.35, 36.25]] },
+  shizuoka: { label: "静岡県", group: "中部", scaleKm: 110, hintLevel: 2,
+    bboxes: [[138.3, 34.95, 138.5, 35.05], [137.65, 34.65, 137.85, 34.8], [138.9, 35.05, 139.1, 35.2]] },
+  aichi: { label: "愛知県", group: "中部", scaleKm: 80, hintLevel: 2,
+    bboxes: [[136.85, 35.1, 137.05, 35.25], [137.1, 34.95, 137.3, 35.1], [137.35, 34.7, 137.55, 34.82]] },
+
+  mie: { label: "三重県", group: "近畿", scaleKm: 100, hintLevel: 2,
+    bboxes: [[136.45, 34.65, 136.65, 34.8], [136.4, 34.45, 136.6, 34.6], [136.7, 34.45, 136.9, 34.6]] },
+  shiga: { label: "滋賀県", group: "近畿", scaleKm: 60, hintLevel: 2,
+    bboxes: [[135.85, 35.0, 136.05, 35.15], [136.2, 35.25, 136.4, 35.4], [135.95, 34.95, 136.15, 35.05]] },
+  kyoto: { label: "京都府", group: "近畿", scaleKm: 70, hintLevel: 2,
+    bboxes: [[135.72, 34.98, 135.82, 35.06], [135.6, 34.85, 135.78, 34.98], [135.2, 35.45, 135.4, 35.58]] },
+  osaka: { label: "大阪府", group: "近畿", scaleKm: 45, hintLevel: 2,
+    bboxes: [[135.47, 34.65, 135.58, 34.73], [135.5, 34.55, 135.65, 34.66], [135.55, 34.75, 135.72, 34.85]] },
+  hyogo: { label: "兵庫県", group: "近畿", scaleKm: 100, hintLevel: 2,
+    bboxes: [[135.15, 34.66, 135.3, 34.75], [134.65, 34.78, 134.9, 34.9], [134.9, 34.65, 135.1, 34.78]] },
+  nara: { label: "奈良県", group: "近畿", scaleKm: 60, hintLevel: 2,
+    bboxes: [[135.75, 34.65, 135.9, 34.75], [135.75, 34.45, 135.9, 34.58], [135.85, 34.28, 136.0, 34.4]] },
+  wakayama: { label: "和歌山県", group: "近畿", scaleKm: 80, hintLevel: 2,
+    bboxes: [[135.15, 34.2, 135.3, 34.32], [135.3, 33.9, 135.5, 34.05], [135.7, 33.65, 135.9, 33.8]] },
+
+  tottori: { label: "鳥取県", group: "中国・四国", scaleKm: 70, hintLevel: 2,
+    bboxes: [[134.15, 35.45, 134.35, 35.55], [133.3, 35.4, 133.5, 35.5], [133.95, 35.4, 134.15, 35.5]] },
+  shimane: { label: "島根県", group: "中国・四国", scaleKm: 90, hintLevel: 2,
+    bboxes: [[133.0, 35.42, 133.2, 35.53], [132.65, 35.15, 132.85, 35.3], [132.05, 34.85, 132.25, 35.0]] },
+  okayama: { label: "岡山県", group: "中国・四国", scaleKm: 80, hintLevel: 2,
+    bboxes: [[133.85, 34.6, 134.0, 34.72], [133.7, 34.55, 133.85, 34.65], [133.35, 34.45, 133.55, 34.6]] },
+  hiroshima: { label: "広島県", group: "中国・四国", scaleKm: 80, hintLevel: 2,
+    bboxes: [[132.4, 34.36, 132.55, 34.48], [133.3, 34.45, 133.5, 34.58], [132.55, 34.22, 132.75, 34.35]] },
+  yamaguchi: { label: "山口県", group: "中国・四国", scaleKm: 80, hintLevel: 2,
+    bboxes: [[131.4, 33.92, 131.6, 34.05], [131.4, 34.15, 131.6, 34.28], [130.9, 33.95, 131.1, 34.08]] },
+  tokushima: { label: "徳島県", group: "中国・四国", scaleKm: 60, hintLevel: 2,
+    bboxes: [[134.5, 34.03, 134.65, 34.13], [134.3, 33.9, 134.5, 34.05], [134.15, 33.85, 134.35, 34.0]] },
+  kagawa: { label: "香川県", group: "中国・四国", scaleKm: 45, hintLevel: 2,
+    bboxes: [[134.0, 34.3, 134.15, 34.4], [133.75, 34.25, 133.95, 34.38], [134.15, 34.15, 134.35, 34.28]] },
+  ehime: { label: "愛媛県", group: "中国・四国", scaleKm: 80, hintLevel: 2,
+    bboxes: [[132.7, 33.8, 132.85, 33.9], [132.95, 33.9, 133.15, 34.05], [132.5, 33.2, 132.7, 33.35]] },
+  kochi: { label: "高知県", group: "中国・四国", scaleKm: 90, hintLevel: 2,
+    bboxes: [[133.45, 33.52, 133.65, 33.62], [133.6, 33.6, 133.8, 33.72], [132.9, 32.95, 133.1, 33.1]] },
+
+  fukuoka: { label: "福岡県", group: "九州・沖縄", scaleKm: 80, hintLevel: 2,
+    bboxes: [[130.35, 33.55, 130.5, 33.65], [130.8, 33.85, 131.0, 33.95], [130.4, 33.3, 130.6, 33.42]] },
+  saga: { label: "佐賀県", group: "九州・沖縄", scaleKm: 55, hintLevel: 2,
+    bboxes: [[130.25, 33.23, 130.4, 33.35], [129.95, 33.42, 130.15, 33.55], [130.05, 33.15, 130.25, 33.28]] },
+  nagasaki: { label: "長崎県", group: "九州・沖縄", scaleKm: 90, hintLevel: 2,
+    bboxes: [[129.83, 32.72, 129.95, 32.82], [129.65, 33.13, 129.8, 33.25], [129.25, 34.15, 129.45, 34.35]] },
+  kumamoto: { label: "熊本県", group: "九州・沖縄", scaleKm: 80, hintLevel: 2,
+    bboxes: [[130.65, 32.75, 130.8, 32.85], [130.55, 32.45, 130.75, 32.58], [131.0, 32.85, 131.2, 32.98]] },
+  oita: { label: "大分県", group: "九州・沖縄", scaleKm: 70, hintLevel: 2,
+    bboxes: [[131.55, 33.18, 131.75, 33.3], [131.45, 33.25, 131.6, 33.38], [131.3, 33.05, 131.5, 33.18]] },
+  miyazaki: { label: "宮崎県", group: "九州・沖縄", scaleKm: 80, hintLevel: 2,
+    bboxes: [[131.35, 31.85, 131.5, 31.98], [131.6, 32.4, 131.75, 32.55], [131.05, 32.05, 131.25, 32.2]] },
+  kagoshima: { label: "鹿児島県", group: "九州・沖縄", scaleKm: 110, hintLevel: 2,
+    bboxes: [[130.5, 31.55, 130.65, 31.65], [130.3, 31.35, 130.5, 31.5], [129.45, 28.3, 129.65, 28.45]] },
+  okinawa: { label: "沖縄県", group: "九州・沖縄", scaleKm: 80, hintLevel: 2,
+    bboxes: [[127.65, 26.18, 127.85, 26.35], [127.85, 26.4, 128.1, 26.6], [125.25, 24.75, 125.42, 24.88]] },
+
+  /* ---------- 海外（hintLevel:1 = 国は自明なので州・都市から） ---------- */
+  c_korea: { label: "韓国", group: "アジア", scaleKm: 400, hintLevel: 1,
+    bboxes: [[126.85, 37.45, 127.15, 37.65], [129.0, 35.1, 129.2, 35.25], [128.5, 35.8, 128.7, 35.95]] },
+  c_taiwan: { label: "台湾", group: "アジア", scaleKm: 350, hintLevel: 1,
+    bboxes: [[121.45, 25.0, 121.62, 25.12], [120.6, 24.12, 120.75, 24.22], [120.25, 22.6, 120.4, 22.72]] },
+  c_thailand: { label: "タイ", group: "アジア", scaleKm: 800, hintLevel: 1,
+    bboxes: [[100.45, 13.68, 100.65, 13.82], [98.95, 18.75, 99.05, 18.82]] },
+  c_singapore: { label: "シンガポール", group: "アジア", scaleKm: 50, hintLevel: 1,
+    bboxes: [[103.75, 1.27, 103.9, 1.37]] },
+  c_usa: { label: "アメリカ", group: "北米", scaleKm: 4000, hintLevel: 1,
+    bboxes: [[-74.02, 40.7, -73.93, 40.79], [-118.35, 34.02, -118.2, 34.12], [-122.45, 37.74, -122.38, 37.8],
+             [-87.7, 41.85, -87.6, 41.93], [-122.36, 47.58, -122.29, 47.65], [-97.78, 30.24, -97.7, 30.31]] },
+  c_canada: { label: "カナダ", group: "北米", scaleKm: 3000, hintLevel: 1,
+    bboxes: [[-79.42, 43.63, -79.35, 43.7], [-123.15, 49.24, -123.06, 49.3], [-73.6, 45.48, -73.53, 45.54]] },
+  c_mexico: { label: "メキシコ", group: "北米", scaleKm: 1500, hintLevel: 1,
+    bboxes: [[-99.18, 19.38, -99.1, 19.45], [-103.38, 20.65, -103.3, 20.72]] },
+  c_uk: { label: "イギリス", group: "ヨーロッパ", scaleKm: 700, hintLevel: 1,
+    bboxes: [[-0.2, 51.48, -0.05, 51.55], [-2.28, 53.45, -2.2, 53.5], [-3.2, 55.93, -3.13, 55.97]] },
+  c_france: { label: "フランス", group: "ヨーロッパ", scaleKm: 800, hintLevel: 1,
+    bboxes: [[2.28, 48.83, 2.4, 48.89], [4.82, 45.74, 4.88, 45.78], [5.35, 43.28, 5.42, 43.32]] },
+  c_germany: { label: "ドイツ", group: "ヨーロッパ", scaleKm: 700, hintLevel: 1,
+    bboxes: [[13.35, 52.49, 13.45, 52.54], [11.54, 48.12, 11.62, 48.17], [9.98, 53.53, 10.05, 53.58]] },
+  c_italy: { label: "イタリア", group: "ヨーロッパ", scaleKm: 900, hintLevel: 1,
+    bboxes: [[12.45, 41.88, 12.53, 41.93], [9.16, 45.45, 9.23, 45.5], [11.24, 43.76, 11.29, 43.79]] },
+  c_spain: { label: "スペイン", group: "ヨーロッパ", scaleKm: 800, hintLevel: 1,
+    bboxes: [[-3.72, 40.4, -3.65, 40.45], [2.15, 41.38, 2.2, 41.42], [-5.99, 37.38, -5.97, 37.4]] },
+  c_netherlands: { label: "オランダ", group: "ヨーロッパ", scaleKm: 250, hintLevel: 1,
+    bboxes: [[4.86, 52.35, 4.93, 52.39], [4.45, 51.9, 4.52, 51.94]] },
+  c_sweden: { label: "スウェーデン", group: "ヨーロッパ", scaleKm: 900, hintLevel: 1,
+    bboxes: [[18.03, 59.31, 18.11, 59.35], [11.95, 57.69, 12.02, 57.73], [13.0, 55.58, 13.05, 55.61]] },
+  c_australia: { label: "オーストラリア", group: "その他", scaleKm: 3000, hintLevel: 1,
+    bboxes: [[151.18, -33.89, 151.25, -33.85], [144.94, -37.83, 145.0, -37.79], [153.0, -27.49, 153.06, -27.45]] },
+  c_brazil: { label: "ブラジル", group: "その他", scaleKm: 3000, hintLevel: 1,
+    bboxes: [[-46.66, -23.57, -46.6, -23.53], [-43.22, -22.93, -43.15, -22.89]] },
 };
 
 export function regionScaleKm(region: RegionKey): number {
   return REGION_DEFS[region]?.scaleKm ?? 200;
+}
+
+/** そのエリアで最初に出すヒントの粒度 */
+export function regionHintLevel(region: RegionKey): 0 | 1 | 2 {
+  return REGION_DEFS[region]?.hintLevel ?? 0;
 }
 
 /* ------------------------------------------------------------------ *
@@ -265,26 +413,20 @@ function ageYears(img: RawImage): number {
 
 /**
  * 地点としての「遊べる度」を採点する。重みの大きい順に:
- *  1. 360度パノラマ（視点を回せないと推理にならない）
- *  2. 解像度（看板・標識が読めるかを直接左右する。ここを最重視した）
- *  3. 撮影の新しさ（新しいほどカメラが良く、街並みも現在に近い）
- *  4. 周囲150m以内の画像枚数（多いほど歩き回れる）
- *  5. 同じシーケンスの長さ（長いほど前後にどこまでも進める）
+ *  1. 360度パノラマ
+ *  2. 解像度（看板・標識が読めるかを直接左右する）
+ *  3. 撮影の新しさ
+ *  4. 周囲150m以内の画像枚数
+ *  5. 同じシーケンスの長さ
  *  6. Mapillaryの品質スコア
  */
 function playabilityScore(img: RawImage, neighbors: number, seqLength: number): number {
   const pano = img.is_pano ? 4_000_000 : 0;
-
-  // 8000px で満点。2048px なら 1/4 しか入らない
   const resolution = Math.min(1, (img.width ?? 1024) / 8000) * 1_500_000;
-
-  // 1年以内なら満点、10年前で0
   const freshness = Math.max(0, 1 - ageYears(img) / 10) * 900_000;
-
   const density = Math.min(neighbors, 30) * 20_000;
   const sequence = Math.min(seqLength, 30) * 13_000;
   const quality = Math.max(0, Math.min(1, img.quality_score ?? 0.5)) * 200_000;
-
   return pano + resolution + freshness + density + sequence + quality;
 }
 
@@ -335,31 +477,27 @@ function pickByTier(ranked: RankedSpot[], tiers: QualityTier[], accept: (r: Rank
   return null;
 }
 
-/** 検索が完全に失敗した場合の最終フォールバック: 地方内の完全ランダム座標(画像なし) */
+/** 検索が完全に失敗した場合の最終フォールバック */
 export function randomFallbackPoint(region: RegionKey): LatLng {
   return randomPointInRegion(region);
 }
 
 /**
- * 指定した地方の中からランダムな座標を選び、その近くのMapillary画像を探す。
- *
- * 探索は「良い条件で何度も引き直す」方式。
- *   序盤(0-5回目)  … QUALITY_TIERS の上位2段だけ（高解像度の360度写真）
- *   中盤(6-9回目)  … 上位4段まで
- *   終盤(10回目〜) … 全段（最後は妥協）
- * 引き直す回数を増やすほど画質は上がるが、そのぶん探索に時間がかかる。
+ * 指定したエリアの中からランダムな座標を選び、その近くのMapillary画像を探す。
+ * 「良い条件で何度も引き直す」方式。引き直す回数を増やすほど画質は上がる。
  */
 export async function findStreetPoint(
   token: string,
   region: RegionKey,
   avoidPoints: LatLng[] = []
 ): Promise<StreetSpot | null> {
-  const minSeparationKm = region === "world" ? 50 : 5;
+  const scale = regionScaleKm(region);
+  // 狭いエリアほど「前回と同じ場所」を避ける距離も狭くしないと、候補が尽きる
+  const minSeparationKm = Math.max(0.6, Math.min(50, scale / 60));
   let lastResort: StreetSpot | null = null;
 
   for (let attempt = 0; attempt < 14; attempt++) {
     const center = randomPointInRegion(region);
-    // 序盤は狭く探して密集地(=見応えのある場所)を狙い、外れ続けたら広げる
     const radius = attempt < 5 ? 0.03 : attempt < 10 ? 0.08 : 0.15;
     const candidates = await searchOnce(token, center, radius);
     if (candidates.length === 0) continue;
@@ -381,12 +519,6 @@ export async function findStreetPoint(
  * 逃走者の移動ロジック（ルールベース。機械学習・LLMは使っていない）
  * ------------------------------------------------------------------ */
 
-/**
- * どの方角へ逃げるかを決める。
- *  - 追跡者の回答がまだ遠い(30km超) … これまでの進行方向を維持して直線的に逃げる
- *  - 詰められている(30km以内)       … 一番近い回答から見て「遠ざかる向き」へ舵を切る
- * どちらも±ブレを入れて、完全に読み切られないようにする。
- */
 function escapeBearing(current: LatLng, pursuers: LatLng[], lastBearing: number | null): { bearing: number; pressureKm: number } {
   const drift = () => Math.random() * 120 - 60;
 
@@ -410,19 +542,13 @@ function escapeBearing(current: LatLng, pursuers: LatLng[], lastBearing: number 
 
   // 追跡者 → 現在地 の向きへ進めば、そのまま離れていく
   const away = bearingDeg(nearest, current);
-  // 詰められているほどブレを小さくして、まっすぐ逃げる
   const spread = pressureKm < 5 ? 40 : 80;
   return { bearing: (away + (Math.random() * spread - spread / 2) + 360) % 360, pressureKm };
 }
 
 /**
  * 逃走者の移動先を決める。
- *  ・通常     : 逃走方向へ 0.6〜4km 前進（見つかりにくいが追える距離）
- *  ・詰められた: 遠くへワープする確率が上がる
- * 画像が見つからなければ距離を変えて数回リトライする。
- *
  * pursuers には「そのラウンドで実際に送られてきた回答座標」を渡す。
- * これにより、当てずっぽうでなく“追われている方向から離れる”動きになる。
  */
 export async function moveAI(
   token: string,
@@ -434,22 +560,18 @@ export async function moveAI(
 ): Promise<(StreetSpot & { bearing: number }) | null> {
   const { bearing: baseBearing, pressureKm } = escapeBearing(current, pursuers, lastBearing);
 
-  // 追い詰められているほどワープしやすくする（0.2 〜 0.55）
   const jumpChance = pressureKm < 5 ? 0.55 : pressureKm < 30 ? 0.35 : 0.2;
   const shouldJump = Math.random() < jumpChance;
 
   if (!shouldJump) {
-    // 近距離から順に試す。詰められているときは遠くから試す
     const steps = pressureKm < 5 ? [4.0, 2.4, 1.2, 0.6] : [1.2, 2.4, 0.6, 4.0];
     for (const distanceKm of steps) {
       const bearing = (baseBearing + (Math.random() * 30 - 15) + 360) % 360;
       const nextPoint = destinationPoint(current, bearing, distanceKm);
-      // 半径を少し広げて候補を増やし、密度判定が効くようにする
       const nearby = await searchOnce(token, nextPoint, 0.03, 60);
       if (nearby.length === 0) continue;
 
       const ranked = rankSpots(nearby);
-      // 移動先も同じ基準で選ぶ。ここで妥協すると画質がガタ落ちする
       const picked = pickByTier(ranked, QUALITY_TIERS, () => true) ?? ranked[0];
       if (!picked) continue;
       return { ...picked.spot, bearing: bearingDeg(current, picked.spot.point) };
@@ -462,19 +584,16 @@ export async function moveAI(
 }
 
 /* ------------------------------------------------------------------ *
- * 任意地点の画像探索（下見・別の道へ・360度を探す・鮮明な写真を探す）
+ * 任意地点の画像探索（下見・別の道へ）
  * ------------------------------------------------------------------ */
 
 export interface NearestOptions {
-  /** 360度パノラマだけを対象にする */
   panoOnly?: boolean;
-  /** 元画像の最低横ピクセル数。「もっと鮮明な写真を探す」で使う */
-  minWidth?: number;
-  /** この画像IDは選ばない（同じ場所に戻らないように） */
+  /** この画像IDは選ばない */
   excludeId?: string;
   /** このシーケンスは選ばない（別の道へ移りたいとき） */
   excludeSequenceId?: string;
-  /** これより近い画像は選ばない(km)。0.05なら50m以上離れた画像になる */
+  /** これより近い画像は選ばない(km) */
   minKm?: number;
   /** 検索半径(度)の開始値 */
   startRadius?: number;
@@ -482,7 +601,7 @@ export interface NearestOptions {
 
 /** クリック地点／現在地に近い画像を返す。条件に合うものが無ければ段階的にゆるめる */
 export async function nearestImage(token: string, point: LatLng, opts: NearestOptions = {}): Promise<StreetSpot | null> {
-  const { panoOnly = false, minWidth = 0, excludeId, excludeSequenceId, minKm = 0, startRadius = 0.008 } = opts;
+  const { panoOnly = false, excludeId, excludeSequenceId, minKm = 0, startRadius = 0.008 } = opts;
   const radii = [startRadius, startRadius * 2.5, startRadius * 7, startRadius * 18];
 
   let relaxed: StreetSpot | null = null;
@@ -498,12 +617,9 @@ export async function nearestImage(token: string, point: LatLng, opts: NearestOp
     });
     if (usable.length === 0) continue;
 
-    let pool = usable;
-    if (panoOnly) pool = pool.filter((c) => c.is_pano);
-    if (minWidth > 0) pool = pool.filter((c) => (c.width ?? 0) >= minWidth);
+    const pool = panoOnly ? usable.filter((c) => c.is_pano) : usable;
     const target = pool.length > 0 ? pool : usable;
 
-    // 距離順に見て、minKm を満たす最初のものを採用する
     const sorted = target
       .map((c) => ({ img: c, d: haversineKmLocal(point, coordOf(c)) }))
       .sort((a, b) => a.d - b.d);
@@ -517,11 +633,7 @@ export async function nearestImage(token: string, point: LatLng, opts: NearestOp
   return relaxed;
 }
 
-/**
- * 現在地から指定した方位・距離だけ離れた地点を球面三角法で計算する。
- * 移動先の座標をそのままMapillaryで検索すれば、Mapillaryの画像自体が
- * 道路・歩道沿いに撮影されているため、結果的に道路沿いの地点に着地する。
- */
+/** 現在地から指定した方位・距離だけ離れた地点を球面三角法で計算する */
 export function destinationPoint(from: LatLng, bearingDegrees: number, distanceKm = 0.8): LatLng {
   const R = 6371;
   const rad = (deg: number) => (deg * Math.PI) / 180;
@@ -552,7 +664,6 @@ interface Place {
 
 /**
  * Nominatimは「1リクエスト/秒」「User-Agent必須」が利用規約。
- * ラウンドごとに素で叩くと規約違反になりやすいので、
  * 小数第2位(約1km四方)に丸めたキーでKVに30日キャッシュする。
  */
 export async function reverseGeocode(point: LatLng, kv?: KVNamespace): Promise<Place> {
@@ -583,16 +694,16 @@ export async function reverseGeocode(point: LatLng, kv?: KVNamespace): Promise<P
         town?: string;
         village?: string;
         county?: string;
+        suburb?: string;
       };
     };
     const addr = data.address ?? {};
     const place: Place = {
       country: addr.country,
       state: addr.state ?? addr.province,
-      city: addr.city ?? addr.town ?? addr.village ?? addr.county,
+      city: addr.city ?? addr.town ?? addr.village ?? addr.county ?? addr.suburb,
     };
     if (kv) {
-      // 待たずに書き込む（DOのalarm処理を遅らせない）
       kv.put(key, JSON.stringify(place), { expirationTtl: 60 * 60 * 24 * 30 }).catch(() => {});
     }
     return place;
@@ -604,16 +715,22 @@ export async function reverseGeocode(point: LatLng, kv?: KVNamespace): Promise<P
 
 /**
  * 段階的に開示するヒントを、ゆるい順→具体的な順で生成する。
- * 1つ目から答えが分かってしまわないよう、順序と粒度を固定している。
+ *
+ * 順序は固定:
+ *   国・地域 → 都道府県・州 → 市区町村 → おおよその緯度経度 → 詳しい座標
+ *
+ * ただし hintLevel より粗いヒントは省く。
+ * たとえば「大阪府」を選んで遊んでいるなら、国と都道府県は最初から分かって
+ * いるので出さず、市区町村から始める。
  */
-export async function buildPlaceHints(point: LatLng, kv?: KVNamespace): Promise<string[]> {
+export async function buildPlaceHints(point: LatLng, kv?: KVNamespace, hintLevel: 0 | 1 | 2 = 0): Promise<string[]> {
   const place = await reverseGeocode(point, kv);
   const hints: string[] = [];
 
-  if (place.country) hints.push(`国・地域: ${place.country}`);
-  hints.push(`おおよその緯度: ${Math.round(point.lat)}° / 経度: ${Math.round(point.lng)}°`);
-  if (place.state) hints.push(`都道府県・州: ${place.state}`);
+  if (hintLevel <= 0 && place.country) hints.push(`国・地域: ${place.country}`);
+  if (hintLevel <= 1 && place.state) hints.push(`都道府県・州: ${place.state}`);
   if (place.city) hints.push(`市区町村: ${place.city}`);
+  hints.push(`おおよその緯度: ${Math.round(point.lat)}° / 経度: ${Math.round(point.lng)}°`);
   hints.push(`詳しい座標: ${point.lat.toFixed(2)}, ${point.lng.toFixed(2)}`);
 
   return hints;

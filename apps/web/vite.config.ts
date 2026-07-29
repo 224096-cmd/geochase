@@ -13,13 +13,15 @@ export default defineConfig({
     sourcemap: false,
     rollupOptions: {
       output: {
-        // mapillary-jsとleafletは重いので初期表示のJSから切り離す
+        // mapillary-js / maplibre-gl / leaflet は重いので初期表示のJSから切り離す
         manualChunks: {
           leaflet: ["leaflet"],
           react: ["react", "react-dom"],
         },
       },
     },
+    // maplibre-gl と mapillary-js はどちらも大きい。警告のしきい値を上げておく
+    chunkSizeWarningLimit: 1600,
   },
   plugins: [
     react(),
@@ -54,32 +56,37 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ["**/*.{js,css,html,png,svg,webmanifest,woff2}"],
-        // mapillary-jsは約1MBある。初回訪問でいきなり落とすと重いので、
-        // プリキャッシュから外して「実際に画像を見るとき」に取得＋キャッシュする
-        globIgnores: ["**/mapillary*.js"],
+        // mapillary-js は約1MB、maplibre-gl も大きい。初回訪問でいきなり落とすと重いので、
+        // プリキャッシュから外して「実際に使うとき」に取得＋キャッシュする
+        globIgnores: ["**/mapillary*.js", "**/maplibre*.js"],
         // SPAなので、未知のパスはindex.htmlに戻す
         navigateFallback: "index.html",
         navigateFallbackDenylist: [/^\/api\//],
         cleanupOutdatedCaches: true,
-        // mapillary-jsのチャンクは大きいので上限を引き上げる
         maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
         runtimeCaching: [
           {
-            // プリキャッシュから外したmapillary-jsチャンクを、初回取得時にキャッシュする
-            urlPattern: /\/assets\/mapillary.*\.js$/,
+            // プリキャッシュから外した大きいチャンクを、初回取得時にキャッシュする
+            urlPattern: /\/assets\/(mapillary|maplibre).*\.js$/,
             handler: "CacheFirst",
             options: {
-              cacheName: "mapillary-lib",
-              expiration: { maxEntries: 4, maxAgeSeconds: 60 * 60 * 24 * 30 },
+              cacheName: "big-libs",
+              expiration: { maxEntries: 8, maxAgeSeconds: 60 * 60 * 24 * 30 },
               cacheableResponse: { statuses: [0, 200] },
             },
           },
           {
-            // 地図・写真タイル（地理院タイル）。
-            // OSM公式タイルは利用ポリシー上アプリ配布に使えないため、
-            // MapView.tsx ごと地理院タイルへ移行した。ここも合わせて差し替える。
-            // 「一度見た範囲を再訪時に使い回す」だけの通常キャッシュで、
-            // 先読み・一括ダウンロードはしていない。
+            // OpenFreeMap のベクタータイル・フォント・スプライト
+            urlPattern: /^https:\/\/tiles\.openfreemap\.org\/.*/i,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "openfreemap",
+              expiration: { maxEntries: 1200, maxAgeSeconds: 60 * 60 * 24 * 14 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+          {
+            // 地理院タイル（航空写真・淡色地図）
             urlPattern: /^https:\/\/cyberjapandata\.gsi\.go\.jp\/xyz\/.*/i,
             handler: "CacheFirst",
             options: {
@@ -89,8 +96,7 @@ export default defineConfig({
             },
           },
           {
-            // VITE_WORLD_* で世界タイル（ArcGIS等）を設定したとき用。
-            // 未設定ならこのパターンは一度も一致しないので害はない。
+            // VITE_WORLD_PHOTO_URL に ArcGIS 等を設定したとき用。未設定なら一致しない
             urlPattern: /^https:\/\/.*\.arcgis\.com\/.*/i,
             handler: "CacheFirst",
             options: {

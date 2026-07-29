@@ -40,7 +40,7 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
   const [flatImage, setFlatImage] = useState(false);
   const [playback, setPlayback] = useState<Playback>("none");
   /** 近くの別画像を検索中 */
-  const [seeking, setSeeking] = useState<null | "road" | "pano" | "sharp">(null);
+  const [seeking, setSeeking] = useState<null | "road" | "pano">(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const onReadyRef = useRef(onReady);
@@ -333,48 +333,62 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
 
   /**
    * 近くの別の画像へ移る。
-   *   kind="road"  … いまと違う道／別シーケンスへ（行き止まりからの脱出）
-   *   kind="pano"  … 360度で見られる写真を探す
-   *   kind="sharp" … より高解像度の写真を探す（看板が読めないとき）
+   *
+   * 以前は「別シーケンスかつ50m以上」の1回だけ問い合わせていたため、
+   * その条件に合う画像が無いと何も起きなかった。
+   * 条件を段階的にゆるめて3回試し、必ず何かしら動くようにしてある。
    */
   const jumpNearby = useCallback(
-    async (e: React.MouseEvent, kind: "road" | "pano" | "sharp") => {
+    async (e: React.MouseEvent, kind: "road" | "pano") => {
       e.stopPropagation();
       const current = currentRef.current;
-      if (!apiUrl || !current) return;
+      if (!apiUrl || !current || !current.lat) return;
 
       stopPlayback();
       setSeeking(kind);
-      try {
-        const params = new URLSearchParams({
+
+      const base = () =>
+        new URLSearchParams({
           lat: String(current.lat),
           lng: String(current.lng),
           exclude: current.id,
         });
-        if (kind === "pano") {
-          params.set("pano", "1");
-        } else if (kind === "sharp") {
-          // 5760px = Insta360 X3 / GoPro Max クラス。看板がはっきり読める解像度
-          params.set("minWidth", "5760");
-        } else {
-          if (current.sequenceId) params.set("excludeSeq", current.sequenceId);
-          params.set("minKm", "0.05"); // 50m以上離れた場所を選ぶ
-        }
 
-        const messages = {
-          pano: ["360度の写真に移動しました", "近くに360度写真がありません"],
-          sharp: ["より鮮明な写真に移動しました", "近くにこれ以上鮮明な写真がありません"],
-          road: ["近くの別の道に移動しました", "近くに別の道が見つかりません"],
-        } as const;
+      // 上から順に試し、最初に見つかったものへ移動する
+      const attempts: URLSearchParams[] = [];
+      if (kind === "pano") {
+        const a = base();
+        a.set("pano", "1");
+        attempts.push(a);
+        const b = base();
+        b.set("pano", "1");
+        b.set("minKm", "0.3");
+        attempts.push(b);
+      } else {
+        // 1) 別の撮影シーケンスで50m以上離れた画像
+        const a = base();
+        if (current.sequenceId) a.set("excludeSeq", current.sequenceId);
+        a.set("minKm", "0.05");
+        attempts.push(a);
+        // 2) シーケンスは問わず150m以上（同じ道でも景色が確実に変わる）
+        const b = base();
+        b.set("minKm", "0.15");
+        attempts.push(b);
+        // 3) 最後はとにかく別の画像へ
+        attempts.push(base());
+      }
 
-        const res = await fetch(`${apiUrl}/nearby-image?${params.toString()}`);
-        const data = await res.json();
-        if (data?.found && data.imageId && data.imageId !== current.id) {
-          await viewerRef.current?.moveTo(data.imageId);
-          flash(messages[kind][0]);
-        } else {
-          flash(messages[kind][1]);
+      try {
+        for (const params of attempts) {
+          const res = await fetch(`${apiUrl}/nearby-image?${params.toString()}`);
+          const data = await res.json();
+          if (data?.found && data.imageId && data.imageId !== current.id) {
+            await viewerRef.current?.moveTo(data.imageId);
+            flash(kind === "pano" ? "360度の写真に移動しました" : "近くの別の地点に移動しました");
+            return;
+          }
         }
+        flash(kind === "pano" ? "近くに360度写真がありません" : "近くにこれ以上の地点がありません");
       } catch {
         flash("画像の検索に失敗しました");
       } finally {
@@ -498,20 +512,9 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
               className="street-btn is-wide"
               onClick={(e) => jumpNearby(e, "road")}
               disabled={seeking !== null}
-              title="行き止まりのときは近くの別の道へ移ります"
+              title="行き止まりのときは近くの別の地点へ移ります"
             >
               {seeking === "road" ? "探索中…" : "別の道へ"}
-            </button>
-          )}
-          {apiUrl && (
-            <button
-              type="button"
-              className="street-btn is-wide"
-              onClick={(e) => jumpNearby(e, "sharp")}
-              disabled={seeking !== null}
-              title="看板が読めないときは、近くのより高解像度な写真を探します"
-            >
-              {seeking === "sharp" ? "探索中…" : "鮮明な写真"}
             </button>
           )}
         </div>

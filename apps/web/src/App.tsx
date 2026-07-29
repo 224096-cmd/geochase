@@ -8,6 +8,13 @@ import type { GuessResult, LatLng, Mode, StartOptions } from "./lib/types";
 
 type PanelKey = "settings" | "hints" | "history" | null;
 
+/** サーバーの /regions が返す1件 */
+interface RegionItem {
+  key: string;
+  label: string;
+  group?: string;
+}
+
 const INTERVAL_OPTIONS = [
   { seconds: 15, label: "15秒" },
   { seconds: 30, label: "30秒" },
@@ -26,6 +33,22 @@ const TIME_LIMIT_OPTIONS = [
 ];
 
 const ROUND_OPTIONS = [1, 3, 5, 8, 10];
+
+/** グループの並び順。ここに無いグループは末尾へ回す */
+const GROUP_ORDER = [
+  "まとめ",
+  "地方",
+  "北海道・東北",
+  "関東",
+  "中部",
+  "近畿",
+  "中国・四国",
+  "九州・沖縄",
+  "アジア",
+  "北米",
+  "ヨーロッパ",
+  "その他",
+];
 
 const SETTINGS_KEY = "geochase.settings.v1";
 const ROOM_KEY = "geochase.room.v1";
@@ -87,7 +110,7 @@ export default function App() {
   const [roomId] = useState(resolveRoomId);
   const [settings, setSettings] = useState<StartOptions>(loadSettings);
   const [panel, setPanel] = useState<PanelKey>(null);
-  const [regions, setRegions] = useState<{ key: string; label: string }[]>([]);
+  const [regions, setRegions] = useState<RegionItem[]>([]);
   const [joinId, setJoinId] = useState("");
 
   const [guessPin, setGuessPin] = useState<LatLng | null>(null);
@@ -141,8 +164,23 @@ export default function App() {
     fetch(`${API_URL}/regions`)
       .then((r) => r.json())
       .then((list) => Array.isArray(list) && setRegions(list))
-      .catch(() => setRegions([{ key: "japan_wide", label: "日本全国" }]));
+      .catch(() => setRegions([{ key: "japan_wide", label: "日本全国", group: "まとめ" }]));
   }, []);
+
+  /* 捜索範囲をグループごとにまとめる（<optgroup>用） */
+  const regionGroups = useMemo(() => {
+    const map = new Map<string, RegionItem[]>();
+    regions.forEach((r) => {
+      const g = r.group ?? "その他";
+      if (!map.has(g)) map.set(g, []);
+      map.get(g)!.push(r);
+    });
+    return [...map.entries()].sort((a, b) => {
+      const ia = GROUP_ORDER.indexOf(a[0]);
+      const ib = GROUP_ORDER.indexOf(b[0]);
+      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+    });
+  }, [regions]);
 
   /* ラウンドが変わったら表示をリセット。
      ただし正解直後の答え合わせは数秒残す（すぐ消えると何も見えないため） */
@@ -534,13 +572,20 @@ export default function App() {
                     onChange={(e) => setSettings((s) => ({ ...s, region: e.target.value }))}
                     disabled={isRunning}
                   >
-                    {regions.map((r) => (
-                      <option key={r.key} value={r.key}>
-                        {r.label}
-                      </option>
+                    {regionGroups.map(([group, items]) => (
+                      <optgroup key={group} label={group}>
+                        {items.map((r) => (
+                          <option key={r.key} value={r.key}>
+                            {r.label}
+                          </option>
+                        ))}
+                      </optgroup>
                     ))}
                   </select>
                 </label>
+                <p className="note">
+                  範囲を絞るほどヒントは細かいところから始まります（都道府県を選ぶと市区町村から）。
+                </p>
 
                 {settings.mode === "chase" ? (
                   <label className="field">

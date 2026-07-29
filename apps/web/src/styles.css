@@ -7,7 +7,6 @@
    - 計器バーは常時表示、結果バナーは stage の上に重ねる。
    - 広告バーは body の flex 子。高さは「中身の実寸」に合わせ、
      配信が無いときは main.tsx が .is-empty を付けて枠ごと畳む。
-     （固定50pxを予約していたせいで、広告の下や周りに黒い空白が出ていた）
    ========================================================================== */
 
 :root {
@@ -326,6 +325,9 @@ code {
 
 .pane {
   position: relative;
+  /* Leafletは内部で z-index 400〜800 を使う。ここで stacking context を作って
+     閉じ込めないと、結果バナーやPC広告がタイルの後ろに回り込む */
+  z-index: 0;
   min-height: 0;
   border-radius: var(--radius);
   overflow: hidden;
@@ -339,7 +341,7 @@ code {
   top: 12px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 20;
+  z-index: 1200;
   display: flex;
   align-items: baseline;
   gap: 10px;
@@ -367,7 +369,7 @@ code {
 .stage-overlay {
   position: absolute;
   inset: 0;
-  z-index: 40;
+  z-index: 1300;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -627,6 +629,9 @@ code {
   line-height: 32px !important;
 }
 
+/* MapLibreのキャンバスがLeafletのペイン内で正しく敷かれるようにする */
+.leaflet-maplibre-gl-pane canvas { outline: none; }
+
 /* 軌跡ピンの吹き出し */
 .trail-tip {
   background: rgb(7 12 11 / 92%) !important;
@@ -643,6 +648,7 @@ code {
 /* 小窓のときは地図の操作系を丸ごと隠す */
 .map-wrap.is-compact .leaflet-control-container,
 .map-wrap.is-compact .map-controls,
+.map-wrap.is-compact .map-coords,
 .map-wrap.is-compact .map-credit-btn,
 .map-wrap.is-compact .map-credit-panel,
 .map-wrap.is-compact .map-range-note,
@@ -678,6 +684,35 @@ code {
 .map-btn.is-accent { border-color: var(--brand); color: var(--signal); }
 .map-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* ピンを置いた場所の座標。操作ボタンの1段上に置く */
+.map-coords {
+  position: absolute;
+  left: 8px;
+  bottom: 66px;
+  z-index: 500;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  background: rgb(7 12 11 / 92%);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 6px 11px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.map-coords-label { font-size: 9px; letter-spacing: 0.1em; color: var(--muted); }
+
+.map-coords-value {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.map-coords-copy { font-size: 9px; color: var(--signal); }
+
 /* タイル取得中。航空写真は重いので必ず出す */
 .map-loading {
   position: absolute;
@@ -698,7 +733,7 @@ code {
 
 .map-loading .street-spinner { width: 14px; height: 14px; }
 
-/* 地理院タイルの出所明示。常時の帰属表示に加えて全文を開けるようにする */
+/* 出所明示。常時の帰属表示に加えて全文を開けるようにする */
 .map-credit-btn {
   position: absolute;
   right: 8px;
@@ -733,7 +768,7 @@ code {
 .map-credit-panel p { margin: 0 0 7px; word-break: break-word; }
 .map-credit-panel p:last-child { margin-bottom: 0; }
 
-/* 日本国外の高ズームではタイルが無いので、空白の理由を伝える */
+/* 日本国外の高ズームでは航空写真が無いので、その理由を伝える */
 .map-range-note {
   position: absolute;
   top: 8px;
@@ -825,6 +860,8 @@ code {
 }
 
 .field select:disabled { opacity: 0.5; }
+.field select optgroup { background: var(--surface); color: var(--muted); font-size: 13px; }
+.field select option { background: var(--surface-2); color: var(--text); }
 
 .room-join { display: flex; gap: 6px; }
 .room-join input { flex: 1; min-width: 0; font-family: var(--font-data); }
@@ -912,7 +949,7 @@ code {
   left: 50%;
   bottom: calc(var(--ad-h) + 76px);
   transform: translateX(-50%);
-  z-index: 300;
+  z-index: 1400;
   max-width: min(92vw, 420px);
   background: var(--surface-2);
   border: 1px solid var(--line);
@@ -944,15 +981,8 @@ code {
 }
 
 /* ---------- 広告枠 ----------
-   ここが「広告の下に黒い空白が出る」の原因だったところ。
-   高さを 50px 固定で予約していたため、実際の広告がそれより小さい／
-   配信されない場合に、そのぶんが空白として残っていた。
-
-   いまは:
-   ・高さを予約しない（中身の実寸に合わせる）
-   ・配信が無ければ main.tsx が .is-empty を付け、枠ごと消す
-   ・safe-area の余白は広告があるときだけ入れる
-   これで残った高さはすべて地図とストリートビューに回る。 */
+   高さは予約しない（中身の実寸に合わせる）。
+   配信が無ければ main.tsx が .is-empty を付け、枠ごと畳む。 */
 
 .ad-bar {
   flex: 0 0 auto;
@@ -1018,11 +1048,6 @@ code {
     min-width: 0;
   }
 
-  /*
-    控えの画面は .layout 基準の絶対配置。左下の正方形にして、
-    右側にタブと回答ボタンを2段で並べる。1つの帯にまとめることで
-    「帯＋タブ＋ボタン」の3段ぶんの高さを1段に圧縮し、主画面を広く取る。
-  */
   .stage[data-focus="street"] .pane-map,
   .stage[data-focus="map"] .pane-street {
     position: absolute;
@@ -1039,9 +1064,6 @@ code {
   .stage[data-focus="map"] .pane-street > * {
     pointer-events: none;
   }
-
-  /* .stage は static なので、移動中オーバーレイは position:relative の
-     .layout を基準に敷かれる。追加の指定は要らない */
 
   /* 下の帯: 左の正方形ぶんを空けて、タブと回答ボタンを縦に並べる */
   .sidebar {
@@ -1063,6 +1085,7 @@ code {
   .readout-cell { padding: 5px 10px 7px; }
   .readout-value { font-size: 17px; }
 
+  /* 再生ボタンは横並び＋折り返し。PIPと重ならない幅に収める */
   .street-playback {
     flex-direction: row;
     flex-wrap: wrap;
@@ -1072,6 +1095,11 @@ code {
     max-width: calc(100% - var(--pip) - 24px);
   }
   .street-controls { top: 6px; right: 6px; }
+
+  /* 座標はPIPの上に置く。広告バーとも操作ボタンとも重ならない */
+  .map-coords { bottom: 62px; padding: 5px 9px; }
+  .map-coords-value { font-size: 12px; }
+
   .toast { bottom: calc(var(--ad-h) + 110px); }
 
   /* パネルはタブ帯の真上に開く。タブ帯の高さは変わらないので画面が動かない */
@@ -1122,8 +1150,17 @@ code {
     display: block;
     position: fixed;
     right: 10px;
-    bottom: 8px;
-    z-index: 90;
+    bottom: 10px;
+    /* 実寸を確保しておく。admaxの読み込みが遅れても場所が潰れない */
+    width: 300px;
+    min-height: 250px;
+    /* Leafletのコントロール(z-index:800)より前に出す。
+       ここが 90 だったせいで、以前はPC広告が地図の後ろに隠れていた */
+    z-index: 1500;
+    background: var(--surface);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
   }
 
   .layout { flex-direction: row; }
@@ -1142,7 +1179,7 @@ code {
     min-height: 0;
     border-left: 1px solid var(--line-soft);
     /* 右下に固定した300x250の広告と重ならないよう、その高さぶん空ける */
-    padding-bottom: 266px;
+    padding-bottom: 270px;
   }
 
   .panel-tabs { order: -1; border-top: none; border-bottom: 1px solid var(--line-soft); }
