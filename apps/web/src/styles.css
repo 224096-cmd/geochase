@@ -1237,3 +1237,20 @@ code {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---------- 写真の上の地名オーバーレイ ----------
+   地理院「標準地図」を multiply で重ねる。
+   白い背景は写真をそのまま通し（白×画像=画像）、
+   黒い文字と道路だけが写真の上に焼き付く。
+   濃さを変えたいときは opacity を 0.7〜1.0 の範囲で調整する。 */
+
+.map-labels-tiles {
+  mix-blend-mode: multiply;
+  opacity: 0.95;
+  pointer-events: none;
+}
+
+/* 一覧が古いなど、注意を促したい note */
+.note.is-warn {
+  color: #f3b0aa;
+}

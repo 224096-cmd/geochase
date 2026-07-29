@@ -21,9 +21,9 @@ const targetPinIcon = makePinIcon("#4FD1A5");
    地図タイル — 完全無料・商用利用可のものだけで構成する
 
    ■ 地図（street map）: OpenFreeMap
-     ・登録もAPIキーも不要。表示数・リクエスト数とも無制限
-     ・商用利用可。OpenStreetMapデータ + MapLibre のベクタータイル
-     ・世界中をカバーし、拡大しても文字が潰れない（ベクターなので）
+     ・登録もAPIキーも不要。表示数・リクエスト数とも無制限、商用利用可
+     ・世界中をカバーし、ベクターなので拡大しても文字が潰れない
+     ・読み込みに失敗したら地理院タイル（ラスタ）へ自動で退避する
      tile.openstreetmap.org の公式ラスタタイルは「アプリ配布のような重い利用は
      事前許可なしには禁止」というポリシーがあるため使っていない。
 
@@ -32,16 +32,23 @@ const targetPinIcon = makePinIcon("#4FD1A5");
      ・オルソ化した航空写真の合成なので雲がほぼ写らない
      ・日本国内はズーム18まで。ズーム2〜8は世界衛星モザイクで全世界
 
-   ■ 写真の上の地名: OpenFreeMap のラベルだけを抜き出したスタイルを重ねる
-     ・これで衛星写真でも市区町村名や国名が読める（世界中で機能する）
+   ■ 写真の上の地名
+     地理院「標準地図」を mix-blend-mode: multiply で重ねる。
+     白い背景は写真をそのまま通し（白×画像=画像）、黒い文字と道路だけが
+     写真の上に焼き付く。ラスタだけで完結するので確実に動く。
+     ベクターのラベル専用スタイルを重ねる方式も試したが、
+     描画されないケースがあり信頼できなかったので採らなかった。
+     この方式は日本国内のみ有効（航空写真の高ズームも日本のみなので実害はない）。
    ========================================================================== */
 
 const OFM_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
-const OFM_TILEJSON = "https://tiles.openfreemap.org/planet";
-const OFM_GLYPHS = "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf";
 
 const GSI_LIST_URL = "https://maps.gsi.go.jp/development/ichiran.html";
+/** 淡色地図。OpenFreeMapが使えないときのベースマップ */
 const GSI_PALE_URL = "https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png";
+/** 標準地図。写真の上に重ねて地名・道路を読めるようにする */
+const GSI_STD_URL = "https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png";
+/** 全国最新写真（シームレス航空写真） */
 const GSI_PHOTO_URL = "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg";
 
 /** 404時に赤いバツ画像を出さないための透明1pxタイル */
@@ -54,55 +61,18 @@ const WORLD_TILE_SIZE = Number(import.meta.env.VITE_WORLD_TILE_SIZE ?? 256) || 2
 
 const CREDITS = [
   "地図: © OpenFreeMap © OpenMapTiles © OpenStreetMap contributors",
-  "航空写真: 国土地理院「地理院タイル（写真）」",
+  "航空写真・地名: 国土地理院「地理院タイル」（写真・標準地図・淡色地図）",
   "写真 ズーム9〜13: データソース：Landsat8画像（GSI,TSIC,GEO Grid/AIST）, Landsat8画像（courtesy of the U.S. Geological Survey）, 海底地形（GEBCO）",
   "写真 ズーム2〜8: Images on 世界衛星モザイク画像 obtained from site https://lpdaac.usgs.gov/data_access maintained by the NASA Land Processes Distributed Active Archive Center (LP DAAC), USGS/Earth Resources Observation and Science (EROS) Center, Sioux Falls, South Dakota. Source of image data product.",
   "一部にGRUS画像（© Axelspace）を含みます。",
 ];
 
-/** 地理院の航空写真が高ズームに対応している範囲（日本とその周辺） */
+/** 地理院タイルが高ズームに対応している範囲（日本とその周辺） */
 const JAPAN = { minLat: 20.0, maxLat: 46.5, minLng: 122.0, maxLng: 154.0 };
 
 function insideJapan(lat: number, lng: number) {
   return lat >= JAPAN.minLat && lat <= JAPAN.maxLat && lng >= JAPAN.minLng && lng <= JAPAN.maxLng;
 }
-
-/**
- * 写真の上に重ねる「地名だけ」のスタイル。
- * background レイヤーを持たないので下の写真がそのまま透ける。
- */
-const LABELS_STYLE = {
-  version: 8,
-  sources: {
-    openmaptiles: { type: "vector", url: OFM_TILEJSON },
-  },
-  glyphs: OFM_GLYPHS,
-  layers: [
-    {
-      id: "place-labels",
-      type: "symbol",
-      source: "openmaptiles",
-      "source-layer": "place",
-      filter: [
-        "in",
-        ["get", "class"],
-        ["literal", ["continent", "country", "state", "city", "town", "village", "suburb"]],
-      ],
-      layout: {
-        // 日本語名があれば優先し、無ければラテン文字、それも無ければ既定名
-        "text-field": ["coalesce", ["get", "name:ja"], ["get", "name:latin"], ["get", "name"]],
-        "text-font": ["Noto Sans Bold"],
-        "text-size": ["interpolate", ["linear"], ["zoom"], 3, 11, 8, 13, 12, 15, 16, 17],
-        "text-max-width": 8,
-      },
-      paint: {
-        "text-color": "#ffffff",
-        "text-halo-color": "rgba(0,0,0,0.85)",
-        "text-halo-width": 1.8,
-      },
-    },
-  ],
-};
 
 type LayerKey = "map" | "photo";
 
@@ -149,13 +119,12 @@ export default function MapView({
   const rasterBase = useRef<L.TileLayer | null>(null);
   /** 航空写真 */
   const photoBase = useRef<L.LayerGroup | null>(null);
-  /** 写真の上に重ねる地名 */
-  const labelsLayer = useRef<L.Layer | null>(null);
+  /** 写真の上に重ねる地名（地理院標準地図） */
+  const labelsLayer = useRef<L.TileLayer | null>(null);
 
   const onPickRef = useRef(onPick);
   const lockedRef = useRef(locked);
   const layerRef = useRef<LayerKey>("map");
-  const labelsOnRef = useRef(true);
 
   const [layer, setLayer] = useState<LayerKey>("map");
   const [labelsOn, setLabelsOn] = useState(true);
@@ -168,7 +137,6 @@ export default function MapView({
   onPickRef.current = onPick;
   lockedRef.current = locked;
   layerRef.current = layer;
-  labelsOnRef.current = labelsOn;
 
   /* --- 初期化（1回だけ） --- */
   useEffect(() => {
@@ -216,6 +184,17 @@ export default function MapView({
     gsiPhoto.on("load", () => setTilesLoading(false));
     gsiPhoto.addTo(photo);
     photoBase.current = photo;
+
+    /* --- 写真の上に重ねる地名 --- *
+       className を付けて CSS 側で mix-blend-mode: multiply を効かせる。
+       白背景は写真を素通しし、文字と道路だけが残る。 */
+    labelsLayer.current = L.tileLayer(GSI_STD_URL, {
+      maxZoom: 19,
+      maxNativeZoom: 18,
+      className: "map-labels-tiles",
+      errorTileUrl: BLANK_TILE,
+      zIndex: 5,
+    });
 
     /* --- 地図レイヤー（まずラスタで出しておき、ベクターが来たら差し替える） --- */
     const raster = L.tileLayer(GSI_PALE_URL, {
@@ -268,15 +247,11 @@ export default function MapView({
           style: OFM_STYLE_URL,
           attribution: "© OpenFreeMap © OpenMapTiles © OpenStreetMap contributors",
         });
-        labelsLayer.current = (L as any).maplibreGL({ style: LABELS_STYLE, attribution: "" });
 
         // すでに地図タブを見ているなら、その場でベクターへ差し替える
-        if (layerRef.current === "map" && mapRef.current) {
+        if (layerRef.current === "map" && mapRef.current && vectorBase.current) {
           mapRef.current.removeLayer(raster);
-          vectorBase.current!.addTo(mapRef.current);
-        }
-        if (layerRef.current === "photo" && labelsOnRef.current && mapRef.current) {
-          labelsLayer.current!.addTo(mapRef.current);
+          vectorBase.current.addTo(mapRef.current);
         }
       } catch (err) {
         console.error("MapLibre load failed, falling back to raster tiles", err);
@@ -320,7 +295,10 @@ export default function MapView({
       if (base && map.hasLayer(base)) map.removeLayer(base);
       if (photo && !map.hasLayer(photo)) photo.addTo(map);
       if (labels) {
-        if (labelsOn && !map.hasLayer(labels)) labels.addTo(map);
+        if (labelsOn && !map.hasLayer(labels)) {
+          labels.addTo(map);
+          labels.bringToFront();
+        }
         if (!labelsOn && map.hasLayer(labels)) map.removeLayer(labels);
       }
     }

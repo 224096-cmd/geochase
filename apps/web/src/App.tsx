@@ -34,7 +34,10 @@ const TIME_LIMIT_OPTIONS = [
 
 const ROUND_OPTIONS = [1, 3, 5, 8, 10];
 
-/** グループの並び順。ここに無いグループは末尾へ回す */
+/**
+ * グループの並び順。ここに無いグループは末尾へ回す。
+ * サーバーが group を返さない古いAPIでも、全件が「その他」に入って一覧されるだけで壊れない。
+ */
 const GROUP_ORDER = [
   "まとめ",
   "地方",
@@ -51,6 +54,12 @@ const GROUP_ORDER = [
   "海外｜ヨーロッパ",
   "海外｜その他",
 ];
+
+/**
+ * この件数を下回っていたら、APIが都道府県を知らない古い版だと判断して警告を出す。
+ * （地方8 + まとめ2 = 10件しか無い旧版を検出するため）
+ */
+const EXPECTED_REGION_COUNT = 30;
 
 const SETTINGS_KEY = "geochase.settings.v1";
 const ROOM_KEY = "geochase.room.v1";
@@ -113,6 +122,7 @@ export default function App() {
   const [settings, setSettings] = useState<StartOptions>(loadSettings);
   const [panel, setPanel] = useState<PanelKey>(null);
   const [regions, setRegions] = useState<RegionItem[]>([]);
+  const [regionError, setRegionError] = useState<string | null>(null);
   const [joinId, setJoinId] = useState("");
 
   const [guessPin, setGuessPin] = useState<LatLng | null>(null);
@@ -161,12 +171,29 @@ export default function App() {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   }, [settings]);
 
+  /* 捜索範囲の一覧を取得する。
+     一覧はサーバーの REGION_DEFS が出どころなので、
+     都道府県が出ない＝APIが古いまま、という切り分けができるようにしてある。 */
   useEffect(() => {
     if (!API_URL) return;
     fetch(`${API_URL}/regions`)
       .then((r) => r.json())
-      .then((list) => Array.isArray(list) && setRegions(list))
-      .catch(() => setRegions([{ key: "japan_wide", label: "日本全国", group: "まとめ" }]));
+      .then((list) => {
+        if (!Array.isArray(list) || list.length === 0) {
+          setRegionError("捜索範囲の一覧を取得できませんでした。");
+          return;
+        }
+        setRegions(list);
+        setRegionError(
+          list.length < EXPECTED_REGION_COUNT
+            ? `APIが古い版のため、${list.length}件しか選べません。API側（apps/api）のデプロイを確認してください。`
+            : null
+        );
+      })
+      .catch(() => {
+        setRegions([{ key: "japan_wide", label: "日本全国", group: "まとめ" }]);
+        setRegionError("APIに接続できませんでした。捜索範囲は日本全国のみになります。");
+      });
   }, []);
 
   /* 捜索範囲をグループごとにまとめる（<optgroup>用） */
@@ -568,7 +595,7 @@ export default function App() {
                 </label>
 
                 <label className="field">
-                  <span>捜索範囲</span>
+                  <span>捜索範囲（{regions.length}件）</span>
                   <select
                     value={settings.region}
                     onChange={(e) => setSettings((s) => ({ ...s, region: e.target.value }))}
@@ -585,9 +612,13 @@ export default function App() {
                     ))}
                   </select>
                 </label>
-                <p className="note">
-                  範囲を絞るほどヒントは細かいところから始まります（都道府県を選ぶと市区町村から）。
-                </p>
+                {regionError ? (
+                  <p className="note is-warn">{regionError}</p>
+                ) : (
+                  <p className="note">
+                    範囲を絞るほどヒントは細かいところから始まります（都道府県なら市区町村から、市区町村なら座標から）。
+                  </p>
+                )}
 
                 {settings.mode === "chase" ? (
                   <label className="field">
