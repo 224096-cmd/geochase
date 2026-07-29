@@ -47,18 +47,13 @@ const GROUP_ORDER = [
   "都道府県｜近畿",
   "都道府県｜中国・四国",
   "都道府県｜九州・沖縄",
-  "市区町村｜東日本",
-  "市区町村｜西日本",
   "海外｜アジア",
   "海外｜北米",
   "海外｜ヨーロッパ",
   "海外｜その他",
 ];
 
-/**
- * この件数を下回っていたら、APIが都道府県を知らない古い版だと判断して警告を出す。
- * （地方8 + まとめ2 = 10件しか無い旧版を検出するため）
- */
+/** この件数を下回っていたら、APIが都道府県を知らない古い版だと判断して警告を出す */
 const EXPECTED_REGION_COUNT = 30;
 
 const SETTINGS_KEY = "geochase.settings.v1";
@@ -148,7 +143,7 @@ export default function App() {
 
   const handleResult = useCallback((r: GuessResult) => {
     setResult(r);
-    if (r.correct) {
+    if (r.correct && !r.waiting) {
       navigator.vibrate?.([40, 60, 120]);
       setGuessPin(null);
     }
@@ -161,11 +156,14 @@ export default function App() {
     [showToast]
   );
 
-  const { state, connection, send, start, stop, serverNow } = useGameRoom({
+  const { state, connection, playerId, send, start, stop, serverNow } = useGameRoom({
     roomId,
     onResult: handleResult,
     onCaught: handleCaught,
   });
+
+  /** 自分がホストか。ホストだけが設定変更と開始・停止をできる */
+  const isHost = !state?.hostId || state.hostId === playerId;
 
   useEffect(() => {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -275,17 +273,19 @@ export default function App() {
     setBusy(true);
     try {
       await stop();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "ストップに失敗しました");
     } finally {
       setBusy(false);
     }
-  }, [stop]);
+  }, [stop, showToast]);
 
   const submitGuess = useCallback(() => {
     if (!guessPin) return;
-    if (!send({ type: "guess", lat: guessPin.lat, lng: guessPin.lng, userId: roomId })) {
+    if (!send({ type: "guess", lat: guessPin.lat, lng: guessPin.lng })) {
       showToast("接続が切れています。復帰を待っています");
     }
-  }, [guessPin, roomId, send, showToast]);
+  }, [guessPin, send, showToast]);
 
   const requestHint = useCallback(() => {
     if (!send({ type: "hint" })) showToast("接続が切れています");
@@ -383,6 +383,10 @@ export default function App() {
   const isFinished = state?.status === "finished";
   const isIdle = !state || state.status === "idle";
   const isMoving = Boolean(state?.moving);
+  const players = state?.players ?? 1;
+  const answered = state?.answered ?? 0;
+  /** 通常モードで自分は答え済みだが、他の人を待っている */
+  const waitingOthers = Boolean(result?.waiting);
 
   const countdown = useMemo(() => {
     void tick;
@@ -430,14 +434,19 @@ export default function App() {
           <span className="brand-name">GeoChase</span>
         </div>
 
+        {/*
+          接続状態と人数。狭い画面では文字が省略されて人数が見えなくなっていたので、
+          人数だけは常に読めるバッジとして独立させてある。
+        */}
         <div className="topbar-meta">
           <span className={`link-dot link-${connection}`} aria-hidden="true" />
+          <span className="players-badge" title={isHost ? "あなたがホストです" : "ホストは別の人です"}>
+            <span className="players-icon" aria-hidden="true">👥</span>
+            <span className="players-count">{connection === "online" ? players : "—"}</span>
+            {isHost && <span className="players-host">主</span>}
+          </span>
           <span className="link-label">
-            {connection === "online"
-              ? `接続中・${state?.players ?? 1}人`
-              : connection === "connecting"
-              ? "接続しています"
-              : "再接続しています"}
+            {connection === "online" ? "接続中" : connection === "connecting" ? "接続しています" : "再接続しています"}
           </span>
         </div>
 
@@ -446,7 +455,8 @@ export default function App() {
             type="button"
             className="primary-btn"
             onClick={isRunning ? handleStop : handleStart}
-            disabled={busy || isMoving || connection === "offline"}
+            disabled={busy || isMoving || connection === "offline" || !isHost}
+            title={isHost ? undefined : "ホストだけが開始・停止できます"}
           >
             {busy ? "準備中…" : isIdle ? "スタート" : isRunning ? "ストップ" : "もう一度"}
           </button>
@@ -470,9 +480,22 @@ export default function App() {
         </div>
 
         <div className="readout-cell">
-          <span className="readout-label">合計スコア</span>
+          <span className="readout-label">
+            {state?.mode === "classic" && isRunning ? "回答済み" : "合計スコア"}
+          </span>
           <span className={`readout-value${state && !isIdle ? "" : " is-empty"}`}>
-            {state && !isIdle ? formatScore(state.totalScore) : "—"}
+            {state && !isIdle ? (
+              state.mode === "classic" && isRunning ? (
+                <>
+                  {answered}
+                  <span className="readout-sub">/{players}人</span>
+                </>
+              ) : (
+                formatScore(state.totalScore)
+              )
+            ) : (
+              "—"
+            )}
           </span>
         </div>
 
@@ -542,7 +565,7 @@ export default function App() {
               markerPosition={guessPin}
               targetPosition={result?.target ?? null}
               trail={state?.revealedTrail ?? []}
-              locked={!isRunning || isMoving}
+              locked={!isRunning || isMoving || waitingOthers}
               compact={mapCompact}
               onExplore={guessPin && isRunning && !isMoving ? exploreHere : undefined}
               exploreLoading={exploreLoading}
@@ -559,9 +582,11 @@ export default function App() {
           )}
 
           {result && (
-            <div className={`result ${result.correct ? "is-correct" : "is-miss"}`} role="status">
+            <div className={`result ${result.correct && !waitingOthers ? "is-correct" : "is-miss"}`} role="status">
               <strong>
-                {result.timeUp
+                {waitingOthers
+                  ? `回答しました。他の人を待っています（${answered}/${players}人）`
+                  : result.timeUp
                   ? "時間切れ"
                   : result.correct
                   ? `発見！ +${formatScore(result.score)}`
@@ -569,7 +594,7 @@ export default function App() {
                   ? proximityMessage(result.proximity, result.bearing)
                   : `${formatDistance(result.distanceKm)}のずれ・${formatScore(result.score)}点`}
               </strong>
-              {!result.correct && state?.mode === "chase" && result.distanceKm !== null && (
+              {!result.correct && !waitingOthers && state?.mode === "chase" && result.distanceKm !== null && (
                 <span className="result-sub">誤差 {formatDistance(result.distanceKm)}</span>
               )}
             </div>
@@ -582,12 +607,18 @@ export default function App() {
               <section className="panel">
                 <h2>ゲーム設定</h2>
 
+                {!isHost && (
+                  <p className="note is-warn">
+                    ホストが設定を管理しています。ホストが退室すると、次に入った人へ自動で移ります。
+                  </p>
+                )}
+
                 <label className="field">
                   <span>モード</span>
                   <select
                     value={settings.mode}
                     onChange={(e) => setSettings((s) => ({ ...s, mode: e.target.value as Mode }))}
-                    disabled={isRunning}
+                    disabled={isRunning || !isHost}
                   >
                     <option value="chase">逃走モード</option>
                     <option value="classic">通常モード</option>
@@ -599,7 +630,7 @@ export default function App() {
                   <select
                     value={settings.region}
                     onChange={(e) => setSettings((s) => ({ ...s, region: e.target.value }))}
-                    disabled={isRunning}
+                    disabled={isRunning || !isHost}
                   >
                     {regionGroups.map(([group, items]) => (
                       <optgroup key={group} label={group}>
@@ -616,7 +647,7 @@ export default function App() {
                   <p className="note is-warn">{regionError}</p>
                 ) : (
                   <p className="note">
-                    範囲を絞るほどヒントは細かいところから始まります（都道府県なら市区町村から、市区町村なら座標から）。
+                    範囲を絞るほどヒントは細かいところから始まります（都道府県を選ぶと市区町村から）。
                   </p>
                 )}
 
@@ -626,7 +657,7 @@ export default function App() {
                     <select
                       value={settings.intervalSeconds}
                       onChange={(e) => setSettings((s) => ({ ...s, intervalSeconds: Number(e.target.value) }))}
-                      disabled={isRunning}
+                      disabled={isRunning || !isHost}
                     >
                       {INTERVAL_OPTIONS.map((o) => (
                         <option key={o.seconds} value={o.seconds}>
@@ -642,7 +673,7 @@ export default function App() {
                       <select
                         value={settings.timeLimitSeconds}
                         onChange={(e) => setSettings((s) => ({ ...s, timeLimitSeconds: Number(e.target.value) }))}
-                        disabled={isRunning}
+                        disabled={isRunning || !isHost}
                       >
                         {TIME_LIMIT_OPTIONS.map((o) => (
                           <option key={o.seconds} value={o.seconds}>
@@ -656,7 +687,7 @@ export default function App() {
                       <select
                         value={settings.rounds}
                         onChange={(e) => setSettings((s) => ({ ...s, rounds: Number(e.target.value) }))}
-                        disabled={isRunning}
+                        disabled={isRunning || !isHost}
                       >
                         {ROUND_OPTIONS.map((n) => (
                           <option key={n} value={n}>
@@ -665,6 +696,10 @@ export default function App() {
                         ))}
                       </select>
                     </label>
+                    <p className="note">
+                      通常モードは全員が回答するか時間切れになるとラウンドが終わります。
+                      スコアはいちばん近かった人の点が入ります。
+                    </p>
                   </>
                 )}
 
@@ -673,6 +708,8 @@ export default function App() {
                 <h2>ルーム</h2>
                 <p className="note">
                   いまのルーム: <code>{roomId}</code>
+                  <br />
+                  接続中: {players}人{isHost ? "（あなたがホスト）" : ""}
                 </p>
 
                 <label className="field">
@@ -793,20 +830,26 @@ export default function App() {
                 {isMoving ? "次の地点を探しています…" : "次のラウンドへ"}
               </button>
             ) : isFinished ? (
-              <button type="button" className="primary-btn wide" onClick={handleStart} disabled={busy}>
-                もう一度あそぶ（合計 {formatScore(state?.totalScore ?? 0)}点）
+              <button type="button" className="primary-btn wide" onClick={handleStart} disabled={busy || !isHost}>
+                {isHost
+                  ? `もう一度あそぶ（合計 ${formatScore(state?.totalScore ?? 0)}点）`
+                  : `合計 ${formatScore(state?.totalScore ?? 0)}点（ホスト待ち）`}
               </button>
             ) : (
               <button
                 type="button"
                 className="primary-btn wide"
                 onClick={submitGuess}
-                disabled={!guessPin || !isRunning || isMoving}
+                disabled={!guessPin || !isRunning || isMoving || waitingOthers}
               >
                 {isMoving
                   ? "逃走者が移動中…"
+                  : waitingOthers
+                  ? `他の人を待っています（${answered}/${players}人）`
                   : !isRunning
-                  ? "スタートすると回答できます"
+                  ? isHost
+                    ? "スタートすると回答できます"
+                    : "ホストの開始を待っています"
                   : guessPin
                   ? "ここだと回答する"
                   : "地図をタップしてピンを置く"}

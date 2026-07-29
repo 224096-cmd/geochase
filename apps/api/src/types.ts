@@ -16,17 +16,8 @@ export interface TrailPoint extends LatLng {
   round: number;
 }
 
-export type RegionKey =
-  | "hokkaido"
-  | "tohoku"
-  | "kanto"
-  | "chubu"
-  | "kinki"
-  | "chugoku"
-  | "shikoku"
-  | "kyushu_okinawa"
-  | "japan_wide"
-  | "world";
+/** REGION_DEFS のキー。都道府県・国を増やしても型を直さなくて済むよう文字列にしている */
+export type RegionKey = string;
 
 export type GameMode = "classic" | "chase";
 /** reveal = 回答済みで答え合わせ表示中（通常モードのみ） */
@@ -38,7 +29,8 @@ export interface StartRequestBody {
   intervalSeconds?: number; // 逃走モードの移動間隔(秒)
   timeLimitSeconds?: number; // 通常モードの1ラウンド制限時間(秒)。最大1800(30分)
   rounds?: number; // 通常モードのラウンド数(1〜10)
-  playerName?: string;
+  /** ホストだけが開始・停止できるようにするための識別子 */
+  playerId?: string;
 }
 
 /** Mapillaryから取得した1地点ぶんの情報 */
@@ -90,12 +82,13 @@ export interface PublicState {
   roundEndsAt: number;
   serverNow: number;
   players: number;
-  /**
-   * 次の地点をMapillaryから探している最中。
-   * 探索は数秒〜十数秒かかることがあるので、クライアントで「移動中」を出せるようにする。
-   */
+  /** いちばん先に入室した人のID。設定変更と開始・停止はこの人だけができる */
+  hostId: string | null;
+  /** 通常モードで、このラウンドに回答済みのプレイヤー数 */
+  answered: number;
+  /** 次の地点をMapillaryから探している最中 */
   moving: boolean;
-  /** 直近で逃走者が移動した時刻(epoch ms)。変化を検知して通知を出すために使う */
+  /** 直近で逃走者が移動した時刻(epoch ms) */
   lastMoveAt: number;
   /** 決着済みラウンドの逃走者位置のみ。進行中ラウンドの答えは含まない */
   revealedTrail: TrailPoint[];
@@ -119,4 +112,6 @@ export interface GuessResultMessage {
   target?: LatLng;
   timeUp?: boolean;
   roundOver: boolean;
+  /** 通常モードで自分の回答は受理されたが、他の人を待っている状態 */
+  waiting?: boolean;
 }

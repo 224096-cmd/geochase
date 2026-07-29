@@ -6,10 +6,6 @@ const FETCH_TIMEOUT_MS = 8000;
 
 /* ------------------------------------------------------------------ *
  * 「遊べる地点」の条件
- *
- * ここを満たさない地点は採用しない。
- * これが無いと、写真が1〜2枚しか無い袋小路に出て
- * 「少ししか動けない・視点も回せない」状態になる。
  * ------------------------------------------------------------------ */
 
 /** 密度を測る半径(km)。この中に何枚あるかで「歩き回れるか」を判断する */
@@ -20,11 +16,20 @@ const MIN_NEIGHBORS = 6;
 const MIN_SEQUENCE_LENGTH = 8;
 
 /* ------------------------------------------------------------------ *
- * 画質の条件
+ * 乗り物の中・上空・海上を除外する条件
  *
- * Mapillaryは投稿型なので、2013年頃のガラケー画質から
- * 最新の8K 360度カメラまで玉石混交。看板を読ませたいなら
- * 「解像度」と「撮影年」で足切りするのがいちばん効く。
+ * Mapillaryには飛行機の窓から撮った写真、新幹線の車窓、
+ * フェリーの甲板といった「そこを歩けない」画像が混ざっている。
+ * 高度と移動速度で機械的に弾く。
+ * ------------------------------------------------------------------ */
+
+/** これより高い地点は上空とみなす(m)。富士山3776mより上に設定 */
+const MAX_ALTITUDE_M = 3900;
+/** これより速い移動は飛行機・新幹線とみなす(m/s)。45m/s = 162km/h */
+const MAX_SPEED_MPS = 45;
+
+/* ------------------------------------------------------------------ *
+ * 画質の条件
  * ------------------------------------------------------------------ */
 
 interface QualityTier {
@@ -76,7 +81,6 @@ interface RegionDef {
 /**
  * 島や山が多い地域は bbox を分割してある。
  * 1つの大きな四角にすると海や山ばかり引いて、地点探索が何度も空振りするため。
- * 各 bbox は「Mapillaryの画像が実際にある市街地」に寄せてある。
  */
 export const REGION_DEFS: Record<string, RegionDef> = {
   /* ---------- まとめ ---------- */
@@ -344,6 +348,9 @@ interface RawImage {
   quality_score?: number;
   /** 撮影シーケンスID。ここが同じ画像同士は前後に歩いて移動できる */
   sequence?: string;
+  /** 撮影高度(m)。飛行機の窓からの撮影を弾くのに使う */
+  altitude?: number;
+  computed_altitude?: number;
 }
 
 function coordOf(img: RawImage): LatLng {
@@ -365,9 +372,10 @@ function toSpot(img: RawImage, neighbors?: number): StreetSpot {
   };
 }
 
-/** sequence を含めて取得する。前後に歩けるかの判定に必須 */
+/** sequence と altitude を含めて取得する。歩けるか・上空でないかの判定に必須 */
 const IMAGE_FIELDS =
-  "id,geometry,computed_geometry,thumb_original_url,thumb_2048_url,thumb_1024_url,is_pano,captured_at,width,height,quality_score,sequence";
+  "id,geometry,computed_geometry,thumb_original_url,thumb_2048_url,thumb_1024_url,is_pano,captured_at," +
+  "width,height,quality_score,sequence,altitude,computed_altitude";
 
 async function searchOnce(token: string, center: LatLng, bboxDegrees: number, limit = 100): Promise<RawImage[]> {
   if (!token) {
@@ -389,6 +397,48 @@ async function searchOnce(token: string, center: LatLng, bboxDegrees: number, li
     console.error("Mapillary JSON parse failed", err);
     return [];
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * 乗り物・上空の除外
+ * ------------------------------------------------------------------ */
+
+/** その画像の高度(m)。取得できなければ null */
+function altitudeOf(img: RawImage): number | null {
+  const a = img.computed_altitude ?? img.altitude;
+  return typeof a === "number" && Number.isFinite(a) ? a : null;
+}
+
+/**
+ * 同じシーケンス内の近い時刻の画像との移動速度(m/s)を求める。
+ * 飛行機なら200m/s級、新幹線でも70m/s級になるので機械的に弾ける。
+ * GPS誤差で速く見えることがあるため、最小値を採って保守的に判定する。
+ */
+function sequenceSpeedMps(img: RawImage, pool: RawImage[]): number | null {
+  if (!img.sequence || !img.captured_at) return null;
+  const here = coordOf(img);
+  let slowest: number | null = null;
+
+  for (const other of pool) {
+    if (other === img || other.sequence !== img.sequence || !other.captured_at) continue;
+    const dtSec = Math.abs(other.captured_at - img.captured_at) / 1000;
+    // 極端に近い/離れた時刻は誤差が大きいので使わない
+    if (dtSec < 0.5 || dtSec > 30) continue;
+    const speed = (haversineKmLocal(here, coordOf(other)) * 1000) / dtSec;
+    if (slowest === null || speed < slowest) slowest = speed;
+  }
+  return slowest;
+}
+
+/** 飛行機・新幹線の車窓・上空でないか */
+function isGroundLevel(img: RawImage, pool: RawImage[]): boolean {
+  const alt = altitudeOf(img);
+  if (alt !== null && alt > MAX_ALTITUDE_M) return false;
+
+  const speed = sequenceSpeedMps(img, pool);
+  if (speed !== null && speed > MAX_SPEED_MPS) return false;
+
+  return true;
 }
 
 /* ------------------------------------------------------------------ *
@@ -426,18 +476,16 @@ function ageYears(img: RawImage): number {
 
 /**
  * 地点としての「遊べる度」を採点する。重みの大きい順に:
- *  1. 360度パノラマ（視点を回せないと推理にならない）
+ *  1. 360度パノラマ
  *  2. 解像度（看板・標識が読めるかを直接左右する）
- *  3. 撮影の新しさ（新しいほどカメラが良く、街並みも現在に近い）
- *  4. 周囲150m以内の画像枚数（多いほど歩き回れる）
- *  5. 同じシーケンスの長さ（長いほど前後にどこまでも進める）
+ *  3. 撮影の新しさ
+ *  4. 周囲150m以内の画像枚数
+ *  5. 同じシーケンスの長さ
  *  6. Mapillaryの品質スコア
  */
 function playabilityScore(img: RawImage, neighbors: number, seqLength: number): number {
   const pano = img.is_pano ? 4_000_000 : 0;
-  // 8000px で満点。2048px なら 1/4 しか入らない
   const resolution = Math.min(1, (img.width ?? 1024) / 8000) * 1_500_000;
-  // 1年以内なら満点、10年前で0
   const freshness = Math.max(0, 1 - ageYears(img) / 10) * 900_000;
   const density = Math.min(neighbors, 30) * 20_000;
   const sequence = Math.min(seqLength, 30) * 13_000;
@@ -453,10 +501,16 @@ interface RankedSpot {
   score: number;
 }
 
-/** 検索結果を「遊べる順」に並べ替える。同点はランダムなので同じ場所ばかりにはならない */
+/**
+ * 検索結果を「遊べる順」に並べ替える。
+ * この段階で上空・高速移動中の画像は完全に取り除く（妥協段階でも復活させない）。
+ */
 function rankSpots(pool: RawImage[]): RankedSpot[] {
   if (pool.length === 0) return [];
-  const shuffled = shuffle(pool);
+  const grounded = pool.filter((img) => isGroundLevel(img, pool));
+  if (grounded.length === 0) return [];
+
+  const shuffled = shuffle(grounded);
   const { neighborsOf, sequenceLength } = analysePool(shuffled);
 
   return shuffled
@@ -492,18 +546,14 @@ function pickByTier(ranked: RankedSpot[], tiers: QualityTier[], accept: (r: Rank
   return null;
 }
 
-/** 検索が完全に失敗した場合の最終フォールバック: エリア内の完全ランダム座標(画像なし) */
+/** 検索が完全に失敗した場合の最終フォールバック */
 export function randomFallbackPoint(region: RegionKey): LatLng {
   return randomPointInRegion(region);
 }
 
 /**
  * 指定したエリアの中からランダムな座標を選び、その近くのMapillary画像を探す。
- *
- * 「良い条件で何度も引き直す」方式。
- *   序盤(0-5回目)  … QUALITY_TIERS の上位2段だけ（高解像度の360度写真）
- *   中盤(6-9回目)  … 上位4段まで
- *   終盤(10回目〜) … 全段（最後は妥協）
+ * 「良い条件で何度も引き直す」方式。引き直す回数を増やすほど画質は上がる。
  */
 export async function findStreetPoint(
   token: string,
@@ -517,13 +567,13 @@ export async function findStreetPoint(
 
   for (let attempt = 0; attempt < 14; attempt++) {
     const center = randomPointInRegion(region);
-    // 序盤は狭く探して密集地(=見応えのある場所)を狙い、外れ続けたら広げる
     const radius = attempt < 5 ? 0.03 : attempt < 10 ? 0.08 : 0.15;
     const candidates = await searchOnce(token, center, radius);
     if (candidates.length === 0) continue;
 
     const ranked = rankSpots(candidates);
-    if (!lastResort && ranked[0]) lastResort = ranked[0].spot;
+    if (ranked.length === 0) continue;
+    if (!lastResort) lastResort = ranked[0].spot;
 
     const depth = attempt < 6 ? 2 : attempt < 10 ? 4 : QUALITY_TIERS.length;
     const notTooClose = (r: RankedSpot) =>
@@ -535,15 +585,39 @@ export async function findStreetPoint(
   return lastResort;
 }
 
+/**
+ * findStreetPoint に「陸地かどうか」の確認を足したもの。
+ *
+ * 逆ジオコーディングで国名が引ければ陸地。海上や上空だと Nominatim は
+ * 住所を返さないので、それを判定材料に使う。
+ * どのみちヒント生成で同じ問い合わせをするうえ、KVにキャッシュされるため
+ * 追加のコストはほとんどかからない。
+ */
+export async function findStreetPointOnLand(
+  token: string,
+  region: RegionKey,
+  kv?: KVNamespace,
+  avoidPoints: LatLng[] = []
+): Promise<StreetSpot | null> {
+  let fallback: StreetSpot | null = null;
+
+  for (let i = 0; i < 3; i++) {
+    const spot = await findStreetPoint(token, region, avoidPoints);
+    if (!spot) break;
+    if (!fallback) fallback = spot;
+
+    const place = await reverseGeocode(spot.point, kv);
+    if (place.country) return spot;
+    console.warn("skipped a point with no address (sea or air?)", spot.point);
+  }
+
+  return fallback;
+}
+
 /* ------------------------------------------------------------------ *
  * 逃走者の移動ロジック（ルールベース。機械学習・LLMは使っていない）
  * ------------------------------------------------------------------ */
 
-/**
- * どの方角へ逃げるかを決める。
- *  - 追跡者の回答がまだ遠い(30km超) … これまでの進行方向を維持して直線的に逃げる
- *  - 詰められている(30km以内)       … 一番近い回答から見て「遠ざかる向き」へ舵を切る
- */
 function escapeBearing(current: LatLng, pursuers: LatLng[], lastBearing: number | null): { bearing: number; pressureKm: number } {
   const drift = () => Math.random() * 120 - 60;
 
@@ -567,7 +641,6 @@ function escapeBearing(current: LatLng, pursuers: LatLng[], lastBearing: number 
 
   // 追跡者 → 現在地 の向きへ進めば、そのまま離れていく
   const away = bearingDeg(nearest, current);
-  // 詰められているほどブレを小さくして、まっすぐ逃げる
   const spread = pressureKm < 5 ? 40 : 80;
   return { bearing: (away + (Math.random() * spread - spread / 2) + 360) % 360, pressureKm };
 }
@@ -575,7 +648,6 @@ function escapeBearing(current: LatLng, pursuers: LatLng[], lastBearing: number 
 /**
  * 逃走者の移動先を決める。
  * pursuers には「そのラウンドで実際に送られてきた回答座標」を渡す。
- * これにより、当てずっぽうでなく“追われている方向から離れる”動きになる。
  */
 export async function moveAI(
   token: string,
@@ -583,12 +655,12 @@ export async function moveAI(
   current: LatLng,
   avoidPoints: LatLng[],
   lastBearing: number | null,
-  pursuers: LatLng[] = []
+  pursuers: LatLng[] = [],
+  kv?: KVNamespace
 ): Promise<(StreetSpot & { bearing: number }) | null> {
   const { bearing: baseBearing, pressureKm } = escapeBearing(current, pursuers, lastBearing);
   const scale = regionScaleKm(region);
 
-  // 追い詰められているほどワープしやすくする（0.2 〜 0.55）
   const jumpChance = pressureKm < 5 ? 0.55 : pressureKm < 30 ? 0.35 : 0.2;
   const shouldJump = Math.random() < jumpChance;
 
@@ -601,35 +673,32 @@ export async function moveAI(
     for (const distanceKm of steps) {
       const bearing = (baseBearing + (Math.random() * 30 - 15) + 360) % 360;
       const nextPoint = destinationPoint(current, bearing, distanceKm);
-      // 半径を少し広げて候補を増やし、密度判定が効くようにする
       const nearby = await searchOnce(token, nextPoint, 0.03, 60);
       if (nearby.length === 0) continue;
 
       const ranked = rankSpots(nearby);
-      // 移動先も同じ基準で選ぶ。ここで妥協すると画質がガタ落ちする
+      if (ranked.length === 0) continue;
       const picked = pickByTier(ranked, QUALITY_TIERS, () => true) ?? ranked[0];
-      if (!picked) continue;
       return { ...picked.spot, bearing: bearingDeg(current, picked.spot.point) };
     }
   }
 
-  const jumped = await findStreetPoint(token, region, avoidPoints);
+  const jumped = await findStreetPointOnLand(token, region, kv, avoidPoints);
   if (!jumped) return null;
   return { ...jumped, bearing: bearingDeg(current, jumped.point) };
 }
 
 /* ------------------------------------------------------------------ *
- * 任意地点の画像探索（下見・別の道へ・360度を探す）
+ * 任意地点の画像探索（下見・別の道へ）
  * ------------------------------------------------------------------ */
 
 export interface NearestOptions {
-  /** 360度パノラマだけを対象にする */
   panoOnly?: boolean;
-  /** この画像IDは選ばない（同じ場所に戻らないように） */
+  /** この画像IDは選ばない */
   excludeId?: string;
   /** このシーケンスは選ばない（別の道へ移りたいとき） */
   excludeSequenceId?: string;
-  /** これより近い画像は選ばない(km)。0.05なら50m以上離れた画像になる */
+  /** これより近い画像は選ばない(km) */
   minKm?: number;
   /** 検索半径(度)の開始値 */
   startRadius?: number;
@@ -649,14 +718,14 @@ export async function nearestImage(token: string, point: LatLng, opts: NearestOp
     const usable = candidates.filter((c) => {
       if (excludeId && c.id === excludeId) return false;
       if (excludeSequenceId && c.sequence && c.sequence === excludeSequenceId) return false;
-      return true;
+      // 上空・高速移動中の画像はここでも弾く
+      return isGroundLevel(c, candidates);
     });
     if (usable.length === 0) continue;
 
     const pool = panoOnly ? usable.filter((c) => c.is_pano) : usable;
     const target = pool.length > 0 ? pool : usable;
 
-    // 距離順に見て、minKm を満たす最初のものを採用する
     const sorted = target
       .map((c) => ({ img: c, d: haversineKmLocal(point, coordOf(c)) }))
       .sort((a, b) => a.d - b.d);
@@ -670,11 +739,7 @@ export async function nearestImage(token: string, point: LatLng, opts: NearestOp
   return relaxed;
 }
 
-/**
- * 現在地から指定した方位・距離だけ離れた地点を球面三角法で計算する。
- * 移動先の座標をそのままMapillaryで検索すれば、Mapillaryの画像自体が
- * 道路・歩道沿いに撮影されているため、結果的に道路沿いの地点に着地する。
- */
+/** 現在地から指定した方位・距離だけ離れた地点を球面三角法で計算する */
 export function destinationPoint(from: LatLng, bearingDegrees: number, distanceKm = 0.8): LatLng {
   const R = 6371;
   const rad = (deg: number) => (deg * Math.PI) / 180;
@@ -705,7 +770,6 @@ interface Place {
 
 /**
  * Nominatimは「1リクエスト/秒」「User-Agent必須」が利用規約。
- * ラウンドごとに素で叩くと規約違反になりやすいので、
  * 小数第2位(約1km四方)に丸めたキーでKVに30日キャッシュする。
  */
 export async function reverseGeocode(point: LatLng, kv?: KVNamespace): Promise<Place> {
@@ -746,7 +810,6 @@ export async function reverseGeocode(point: LatLng, kv?: KVNamespace): Promise<P
       city: addr.city ?? addr.town ?? addr.village ?? addr.county ?? addr.suburb,
     };
     if (kv) {
-      // 待たずに書き込む（DOのalarm処理を遅らせない）
       kv.put(key, JSON.stringify(place), { expirationTtl: 60 * 60 * 24 * 30 }).catch(() => {});
     }
     return place;
@@ -774,7 +837,8 @@ export async function buildPlaceHints(point: LatLng, kv?: KVNamespace, hintLevel
   if (hintLevel <= 1 && place.state) hints.push(`都道府県・州: ${place.state}`);
   if (place.city) hints.push(`市区町村: ${place.city}`);
   hints.push(`おおよその緯度: ${Math.round(point.lat)}° / 経度: ${Math.round(point.lng)}°`);
-  hints.push(`詳しい座標: ${point.lat.toFixed(2)}, ${point.lng.toFixed(2)}`);
+  // 最後のヒントは事実上の答え。小数5桁 ≒ 1m の精度で出す
+  hints.push(`詳しい座標: ${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`);
 
   return hints;
 }

@@ -1254,3 +1254,49 @@ code {
 .note.is-warn {
   color: #f3b0aa;
 }
+
+/* ---------- 接続人数バッジ ----------
+   以前は「接続中・3人」という1行のテキストだったため、
+   スマホでは省略記号に潰れて人数が読めなかった。
+   人数だけ独立したバッジにして、狭い画面でも必ず残るようにする。 */
+
+.players-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text);
+}
+
+.players-icon { font-size: 11px; }
+
+.players-count {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* ホストであることの印 */
+.players-host {
+  background: var(--brand);
+  color: #fff;
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+/* 注意を促す note */
+.note.is-warn { color: #f3b0aa; }
+
+/* 狭い画面では接続状態の文字だけ落とす。人数バッジは残す */
+@media (max-width: 480px) {
+  .link-label { display: none; }
+  .players-badge { padding: 3px 7px; font-size: 11px; }
+}

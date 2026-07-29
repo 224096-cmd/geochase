@@ -36,11 +36,9 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
   const [dataLoading, setDataLoading] = useState(false);
   /** 開始地点から動いているか */
   const [movedAway, setMovedAway] = useState(false);
-  /** 360度ではない平面写真を表示している */
-  const [flatImage, setFlatImage] = useState(false);
   const [playback, setPlayback] = useState<Playback>("none");
   /** 近くの別画像を検索中 */
-  const [seeking, setSeeking] = useState<null | "road" | "pano">(null);
+  const [seeking, setSeeking] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   const onReadyRef = useRef(onReady);
@@ -101,8 +99,6 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
             lng: img.lngLat?.lng ?? 0,
             sequenceId: img.sequenceId ?? "",
           };
-          // spherical 以外は視点を回しきれない。ユーザーに理由を伝える
-          setFlatImage(img.cameraType !== "spherical");
           setMovedAway(Boolean(homeIdRef.current) && img.id !== homeIdRef.current);
         });
 
@@ -332,20 +328,20 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
   );
 
   /**
-   * 近くの別の画像へ移る。
+   * 近くの別の地点へ移る。
    *
    * 以前は「別シーケンスかつ50m以上」の1回だけ問い合わせていたため、
    * その条件に合う画像が無いと何も起きなかった。
    * 条件を段階的にゆるめて3回試し、必ず何かしら動くようにしてある。
    */
   const jumpNearby = useCallback(
-    async (e: React.MouseEvent, kind: "road" | "pano") => {
+    async (e: React.MouseEvent) => {
       e.stopPropagation();
       const current = currentRef.current;
       if (!apiUrl || !current || !current.lat) return;
 
       stopPlayback();
-      setSeeking(kind);
+      setSeeking(true);
 
       const base = () =>
         new URLSearchParams({
@@ -356,27 +352,17 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
 
       // 上から順に試し、最初に見つかったものへ移動する
       const attempts: URLSearchParams[] = [];
-      if (kind === "pano") {
-        const a = base();
-        a.set("pano", "1");
-        attempts.push(a);
-        const b = base();
-        b.set("pano", "1");
-        b.set("minKm", "0.3");
-        attempts.push(b);
-      } else {
-        // 1) 別の撮影シーケンスで50m以上離れた画像
-        const a = base();
-        if (current.sequenceId) a.set("excludeSeq", current.sequenceId);
-        a.set("minKm", "0.05");
-        attempts.push(a);
-        // 2) シーケンスは問わず150m以上（同じ道でも景色が確実に変わる）
-        const b = base();
-        b.set("minKm", "0.15");
-        attempts.push(b);
-        // 3) 最後はとにかく別の画像へ
-        attempts.push(base());
-      }
+      // 1) 別の撮影シーケンスで50m以上離れた画像
+      const a = base();
+      if (current.sequenceId) a.set("excludeSeq", current.sequenceId);
+      a.set("minKm", "0.05");
+      attempts.push(a);
+      // 2) シーケンスは問わず150m以上（同じ道でも景色が確実に変わる）
+      const b = base();
+      b.set("minKm", "0.15");
+      attempts.push(b);
+      // 3) 最後はとにかく別の画像へ
+      attempts.push(base());
 
       try {
         for (const params of attempts) {
@@ -384,15 +370,15 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
           const data = await res.json();
           if (data?.found && data.imageId && data.imageId !== current.id) {
             await viewerRef.current?.moveTo(data.imageId);
-            flash(kind === "pano" ? "360度の写真に移動しました" : "近くの別の地点に移動しました");
+            flash("近くの別の地点に移動しました");
             return;
           }
         }
-        flash(kind === "pano" ? "近くに360度写真がありません" : "近くにこれ以上の地点がありません");
+        flash("近くにこれ以上の地点がありません");
       } catch {
         flash("画像の検索に失敗しました");
       } finally {
-        setSeeking(null);
+        setSeeking(false);
       }
     },
     [apiUrl, flash, stopPlayback]
@@ -420,7 +406,7 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
       />
 
       {/* 読み込み中は上端に細いバーを出す。画面が固まったのか読み込み中なのかが一目で分かる */}
-      {(dataLoading || seeking !== null) && phase === "ready" && <span className="street-progress" aria-hidden="true" />}
+      {(dataLoading || seeking) && phase === "ready" && <span className="street-progress" aria-hidden="true" />}
 
       {phase === "fallback" && imageUrl && <img className="street-fallback" src={imageUrl} alt="現在地のストリート画像" />}
 
@@ -447,18 +433,6 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
       {notice && (
         <div className="street-notice" role="status">
           {notice}
-        </div>
-      )}
-
-      {/* 平面写真のときだけ、その理由と逃げ道を案内する */}
-      {showControls && flatImage && (
-        <div className="street-flat-note">
-          <span>この写真は平面のため、真後ろまでは振り向けません</span>
-          {apiUrl && (
-            <button type="button" onClick={(e) => jumpNearby(e, "pano")} disabled={seeking !== null}>
-              {seeking === "pano" ? "探しています…" : "360°写真を探す"}
-            </button>
-          )}
         </div>
       )}
 
@@ -510,11 +484,11 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
             <button
               type="button"
               className="street-btn is-wide"
-              onClick={(e) => jumpNearby(e, "road")}
-              disabled={seeking !== null}
+              onClick={jumpNearby}
+              disabled={seeking}
               title="行き止まりのときは近くの別の地点へ移ります"
             >
-              {seeking === "road" ? "探索中…" : "別の道へ"}
+              {seeking ? "探索中…" : "別の道へ"}
             </button>
           )}
         </div>

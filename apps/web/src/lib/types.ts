@@ -42,7 +42,11 @@ export interface RoomState {
   roundEndsAt: number;
   serverNow: number;
   players: number;
-  /** サーバーが次の地点を探している最中。UIに「移動中」を出す */
+  /** いちばん先に入室した人のID。設定変更と開始・停止はこの人だけができる */
+  hostId?: string | null;
+  /** 通常モードで、このラウンドに回答済みの人数 */
+  answered?: number;
+  /** サーバーが次の地点を探している最中 */
   moving?: boolean;
   /** 直近の移動完了時刻。変化を検知して通知を出す */
   lastMoveAt?: number;
@@ -60,6 +64,8 @@ export interface GuessResult {
   target?: LatLng;
   timeUp?: boolean;
   roundOver: boolean;
+  /** 通常モードで自分の回答は受理されたが、他の人を待っている状態 */
+  waiting?: boolean;
 }
 
 export interface CaughtMessage {
