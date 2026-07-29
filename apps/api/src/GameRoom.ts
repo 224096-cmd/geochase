@@ -1,5 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
-import type { Env, LatLng, RegionKey, GameMode, GameStatus, PublicState, RoundRecord, ClientMessage } from "./types";
+import type {
+  Env,
+  LatLng,
+  TrailPoint,
+  RegionKey,
+  GameMode,
+  GameStatus,
+  PublicState,
+  RoundRecord,
+  ClientMessage,
+} from "./types";
 import {
   findStreetPoint,
   moveAI,
@@ -21,15 +31,17 @@ const TRAIL_LENGTH = 12;
 const HINT_PENALTY = 250; // ヒント1つあたりの減点
 const RETRY_PENALTY = 60; // 逃走モードで外すたびの減点
 const GUESS_COOLDOWN_MS = 1500;
+/** 逃走判断に使う直近の回答数。多すぎると平均化して動きが鈍る */
+const PURSUIT_MEMORY = 6;
 
 interface RoomState {
   mode: GameMode;
   status: GameStatus;
   round: number;
   maxRounds: number;
-  aiPosition: LatLng | null;
+  runnerPosition: LatLng | null;
   trail: LatLng[];
-  revealedTrail: LatLng[];
+  revealedTrail: TrailPoint[];
   imageUrl: string;
   imageId: string;
   isPano: boolean;
@@ -46,6 +58,12 @@ interface RoomState {
   timeLimitSeconds: number;
   startedAt: number;
   lastBearing: number | null;
+  /** 次の地点を探している最中かどうか。クライアントで「移動中」を出すために配信する */
+  moving: boolean;
+  /** 直近で移動が完了した時刻。クライアントは変化を見て通知を出す */
+  lastMoveAt: number;
+  /** このラウンドに届いた回答座標。逃走方向の決定に使う */
+  roundGuesses: LatLng[];
 }
 
 const DEFAULT_STATE: RoomState = {
@@ -53,7 +71,7 @@ const DEFAULT_STATE: RoomState = {
   status: "idle",
   round: 0,
   maxRounds: CHASE_ROUNDS,
-  aiPosition: null,
+  runnerPosition: null,
   trail: [],
   revealedTrail: [],
   imageUrl: "",
@@ -72,6 +90,9 @@ const DEFAULT_STATE: RoomState = {
   timeLimitSeconds: 0,
   startedAt: 0,
   lastBearing: null,
+  moving: false,
+  lastMoveAt: 0,
+  roundGuesses: [],
 };
 
 export class GameRoom extends DurableObject<Env> {
@@ -83,8 +104,19 @@ export class GameRoom extends DurableObject<Env> {
     super(ctx, env);
     // Durable Objectはアイドル時にメモリが揮発するため、保存された状態があれば復元する
     ctx.blockConcurrencyWhile(async () => {
-      const saved = await ctx.storage.get<RoomState>("gameState");
-      if (saved) this.gameState = { ...DEFAULT_STATE, ...saved };
+      const saved = await ctx.storage.get<Partial<RoomState> & { aiPosition?: LatLng | null }>("gameState");
+      if (!saved) return;
+      this.gameState = { ...DEFAULT_STATE, ...saved };
+      // 旧バージョンの保存データとの互換
+      if (!this.gameState.runnerPosition && saved.aiPosition) this.gameState.runnerPosition = saved.aiPosition;
+      this.gameState.revealedTrail = (this.gameState.revealedTrail ?? []).map((p: any, i) => ({
+        lat: p.lat,
+        lng: p.lng,
+        round: typeof p.round === "number" ? p.round : i + 1,
+      }));
+      this.gameState.roundGuesses = this.gameState.roundGuesses ?? [];
+      // 途中で落ちたときに「移動中」のまま固まらないようにする
+      this.gameState.moving = false;
     });
     // クライアントが送る "ping" にDOを起こさず自動応答する（課金とレイテンシの節約）
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
@@ -92,6 +124,12 @@ export class GameRoom extends DurableObject<Env> {
 
   private async persist() {
     await this.ctx.storage.put("gameState", this.gameState);
+  }
+
+  /** 探索前に「移動中」を配信して、待ち時間を無反応にしない */
+  private announceMoving(moving: boolean) {
+    this.gameState.moving = moving;
+    this.broadcast(this.publicState());
   }
 
   /* ---------------------------------------------------------------- *
@@ -206,7 +244,8 @@ export class GameRoom extends DurableObject<Env> {
    * ---------------------------------------------------------------- */
 
   async handleGuess(ws: WebSocket, lat: number, lng: number, userId: string, playerName?: string) {
-    if (this.gameState.status !== "running" || !this.gameState.aiPosition) return;
+    if (this.gameState.status !== "running" || !this.gameState.runnerPosition) return;
+    if (this.gameState.moving) return; // 移動先を探している最中は受け付けない
     if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return;
 
     const now = Date.now();
@@ -214,12 +253,15 @@ export class GameRoom extends DurableObject<Env> {
     this.lastGuessAt.set(userId, now);
 
     const guess = { lat, lng };
-    const target = this.gameState.aiPosition;
+    const target = this.gameState.runnerPosition;
     const distanceKm = haversineKm(guess, target);
+
+    // 「どこから追われているか」を覚えて、次の移動方向に反映する
+    this.gameState.roundGuesses = [...this.gameState.roundGuesses, guess].slice(-PURSUIT_MEMORY);
 
     if (this.gameState.mode === "classic") {
       await this.settleClassicRound(guess, distanceKm, false);
-      await this.recordGuess(userId, playerName, guess, distanceKm, this.gameState.history.at(-1)?.score ?? 0);
+      this.recordGuess(userId, playerName, guess, distanceKm, this.gameState.history.at(-1)?.score ?? 0);
       return;
     }
 
@@ -242,7 +284,7 @@ export class GameRoom extends DurableObject<Env> {
         })
       );
       this.broadcast(this.publicState());
-      await this.recordGuess(userId, playerName, guess, distanceKm, 0);
+      this.recordGuess(userId, playerName, guess, distanceKm, 0);
       return;
     }
 
@@ -272,14 +314,18 @@ export class GameRoom extends DurableObject<Env> {
     );
     this.broadcast({ type: "caught", userId, playerName: playerName ?? null, round: this.gameState.round, score });
 
-    await this.recordGuess(userId, playerName, guess, distanceKm, score);
+    // D1書き込みは待たない。待つと次の地点探索が始まるまで数百ms止まる
+    this.recordGuess(userId, playerName, guess, distanceKm, score);
     await this.advanceChaseRound();
   }
 
   /** 通常モード1ラウンドの決着。timeUp=true なら時間切れ */
   private async settleClassicRound(guess: LatLng | null, distanceKm: number | null, timeUp: boolean) {
-    const target = this.gameState.aiPosition!;
-    const score = timeUp || distanceKm === null ? 0 : classicScore(distanceKm, regionScaleKm(this.gameState.region), this.gameState.hintPenalty);
+    const target = this.gameState.runnerPosition!;
+    const score =
+      timeUp || distanceKm === null
+        ? 0
+        : classicScore(distanceKm, regionScaleKm(this.gameState.region), this.gameState.hintPenalty);
 
     this.gameState.totalScore += score;
     this.gameState.history = [
@@ -293,7 +339,10 @@ export class GameRoom extends DurableObject<Env> {
         caught: distanceKm !== null && distanceKm <= CORRECT_RADIUS_KM,
       },
     ];
-    this.gameState.revealedTrail = [...this.gameState.revealedTrail, target].slice(-TRAIL_LENGTH);
+    this.gameState.revealedTrail = [
+      ...this.gameState.revealedTrail,
+      { ...target, round: this.gameState.round },
+    ].slice(-TRAIL_LENGTH);
     this.gameState.status = this.gameState.round >= this.gameState.maxRounds ? "finished" : "reveal";
 
     // 回答済みなのに制限時間アラームが後から発火して結果を上書きするのを防ぐ
@@ -354,6 +403,9 @@ export class GameRoom extends DurableObject<Env> {
   }
 
   private async beginClassicRound() {
+    // 探索は数秒かかる。先に「移動中」を配信して画面が止まって見えないようにする
+    this.announceMoving(true);
+
     const spot = await findStreetPoint(this.env.MAPILLARY_TOKEN, this.gameState.region, this.gameState.trail);
     const position = spot?.point ?? randomFallbackPoint(this.gameState.region);
     const hints = await buildPlaceHints(position, this.env.SESSIONS);
@@ -363,7 +415,7 @@ export class GameRoom extends DurableObject<Env> {
       ...this.gameState,
       status: "running",
       round: this.gameState.round + 1,
-      aiPosition: position,
+      runnerPosition: position,
       trail: [...this.gameState.trail, position].slice(-TRAIL_LENGTH),
       imageUrl: spot?.imageUrl ?? "",
       imageId: spot?.imageId ?? "",
@@ -372,8 +424,11 @@ export class GameRoom extends DurableObject<Env> {
       revealedHintCount: 0,
       hintPenalty: 0,
       attempts: 0,
+      roundGuesses: [],
       nextUpdateAt: 0,
       roundEndsAt: this.gameState.timeLimitSeconds > 0 ? now + this.gameState.timeLimitSeconds * 1000 : 0,
+      moving: false,
+      lastMoveAt: now,
     };
 
     await this.persist();
@@ -386,6 +441,10 @@ export class GameRoom extends DurableObject<Env> {
 
   async startChaseGame(region: RegionKey, intervalMs: number) {
     await this.ctx.storage.deleteAlarm();
+
+    this.gameState = { ...DEFAULT_STATE, mode: "chase", region, intervalMs, startedAt: Date.now() };
+    this.announceMoving(true);
+
     const spot = await findStreetPoint(this.env.MAPILLARY_TOKEN, region);
     const position = spot?.point ?? randomFallbackPoint(region);
     const hints = await buildPlaceHints(position, this.env.SESSIONS);
@@ -397,7 +456,7 @@ export class GameRoom extends DurableObject<Env> {
       status: "running",
       round: 1,
       maxRounds: CHASE_ROUNDS,
-      aiPosition: position,
+      runnerPosition: position,
       trail: [position],
       imageUrl: spot?.imageUrl ?? "",
       imageId: spot?.imageId ?? "",
@@ -407,6 +466,8 @@ export class GameRoom extends DurableObject<Env> {
       intervalMs,
       region,
       startedAt: now,
+      moving: false,
+      lastMoveAt: now,
     };
 
     await this.persist();
@@ -419,6 +480,7 @@ export class GameRoom extends DurableObject<Env> {
     this.gameState.status = "idle";
     this.gameState.nextUpdateAt = 0;
     this.gameState.roundEndsAt = 0;
+    this.gameState.moving = false;
     await this.persist();
     this.broadcast(this.publicState());
   }
@@ -430,6 +492,7 @@ export class GameRoom extends DurableObject<Env> {
 
   async alarm() {
     if (this.gameState.status !== "running") return;
+    if (this.gameState.moving) return; // 探索中に重ねて動かさない
 
     if (this.gameState.mode === "classic") {
       await this.settleClassicRound(null, null, true);
@@ -437,12 +500,12 @@ export class GameRoom extends DurableObject<Env> {
     }
 
     // 時間内に見つけられなかったので取り逃がし扱い
-    if (this.gameState.aiPosition) {
+    if (this.gameState.runnerPosition) {
       this.gameState.history = [
         ...this.gameState.history,
         {
           round: this.gameState.round,
-          target: this.gameState.aiPosition,
+          target: this.gameState.runnerPosition,
           guess: null,
           distanceKm: null,
           score: 0,
@@ -454,36 +517,49 @@ export class GameRoom extends DurableObject<Env> {
   }
 
   private async moveToNextLocation() {
-    if (!this.gameState.aiPosition) return;
+    if (!this.gameState.runnerPosition) return;
 
-    const previous = this.gameState.aiPosition;
+    const previous = this.gameState.runnerPosition;
+    const previousRound = this.gameState.round;
 
     if (this.gameState.round >= this.gameState.maxRounds) {
       this.gameState.status = "finished";
-      this.gameState.revealedTrail = [...this.gameState.revealedTrail, previous].slice(-TRAIL_LENGTH);
+      this.gameState.revealedTrail = [
+        ...this.gameState.revealedTrail,
+        { ...previous, round: previousRound },
+      ].slice(-TRAIL_LENGTH);
       this.gameState.nextUpdateAt = 0;
+      this.gameState.moving = false;
       await this.persist();
       this.broadcast(this.publicState());
       await this.saveFinalScore();
       return;
     }
 
+    // Mapillary検索は最悪で十数秒かかる。先に「移動中」を配信しておく。
+    // 同時に、決着したラウンドの位置をここで公開してしまう（軌跡のピンが即座に増える）
+    this.gameState.revealedTrail = [
+      ...this.gameState.revealedTrail,
+      { ...previous, round: previousRound },
+    ].slice(-TRAIL_LENGTH);
+    this.gameState.nextUpdateAt = 0;
+    this.announceMoving(true);
+
     const moved = await moveAI(
       this.env.MAPILLARY_TOKEN,
       this.gameState.region,
       previous,
       this.gameState.trail,
-      this.gameState.lastBearing
+      this.gameState.lastBearing,
+      this.gameState.roundGuesses
     );
     const position = moved?.point ?? previous;
     const hints = await buildPlaceHints(position, this.env.SESSIONS);
 
     this.gameState.round += 1;
-    this.gameState.aiPosition = position;
+    this.gameState.runnerPosition = position;
     this.gameState.lastBearing = moved?.bearing ?? this.gameState.lastBearing;
     this.gameState.trail = [...this.gameState.trail, position].slice(-TRAIL_LENGTH);
-    // 決着したラウンドのAI位置だけを軌跡として公開する
-    this.gameState.revealedTrail = [...this.gameState.revealedTrail, previous].slice(-TRAIL_LENGTH);
     this.gameState.imageUrl = moved?.imageUrl || this.gameState.imageUrl;
     this.gameState.imageId = moved?.imageId || this.gameState.imageId;
     this.gameState.isPano = moved?.isPano ?? this.gameState.isPano;
@@ -491,7 +567,10 @@ export class GameRoom extends DurableObject<Env> {
     this.gameState.revealedHintCount = 0;
     this.gameState.hintPenalty = 0;
     this.gameState.attempts = 0;
-    this.gameState.nextUpdateAt = Date.now() + this.gameState.intervalMs;
+    this.gameState.roundGuesses = [];
+    this.gameState.moving = false;
+    this.gameState.lastMoveAt = Date.now();
+    this.gameState.nextUpdateAt = this.gameState.lastMoveAt + this.gameState.intervalMs;
 
     await this.persist();
     this.broadcast(this.publicState());
@@ -502,37 +581,35 @@ export class GameRoom extends DurableObject<Env> {
    * 永続化（D1）
    * ---------------------------------------------------------------- */
 
-  private async recordGuess(
+  /** 待たずに投げる。失敗してもゲーム進行は止めない */
+  private recordGuess(
     userId: string,
     playerName: string | undefined,
     guess: LatLng,
     distanceKm: number,
     score: number
   ) {
-    try {
-      await this.env.DB.prepare(
-        `INSERT INTO guesses (id, room_id, round_no, user_id, player_name, mode, region,
-                              guess_lat, guess_lng, distance_km, score, guessed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    this.env.DB.prepare(
+      `INSERT INTO guesses (id, room_id, round_no, user_id, player_name, mode, region,
+                            guess_lat, guess_lng, distance_km, score, guessed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(
+        crypto.randomUUID(),
+        this.ctx.id.toString(),
+        this.gameState.round,
+        userId,
+        playerName ?? null,
+        this.gameState.mode,
+        this.gameState.region,
+        guess.lat,
+        guess.lng,
+        distanceKm,
+        score,
+        Date.now()
       )
-        .bind(
-          crypto.randomUUID(),
-          this.ctx.id.toString(),
-          this.gameState.round,
-          userId,
-          playerName ?? null,
-          this.gameState.mode,
-          this.gameState.region,
-          guess.lat,
-          guess.lng,
-          distanceKm,
-          score,
-          Date.now()
-        )
-        .run();
-    } catch (err) {
-      console.error("D1 write failed (guesses)", err);
-    }
+      .run()
+      .catch((err: unknown) => console.error("D1 write failed (guesses)", err));
   }
 
   private async saveFinalScore() {
@@ -595,10 +672,12 @@ export class GameRoom extends DurableObject<Env> {
       totalScore: s.totalScore,
       intervalSeconds: Math.round(s.intervalMs / 1000),
       timeLimitSeconds: s.timeLimitSeconds,
-      nextUpdateAt: s.mode === "chase" && s.status === "running" ? s.nextUpdateAt : 0,
-      roundEndsAt: s.mode === "classic" && s.status === "running" ? s.roundEndsAt : 0,
+      nextUpdateAt: s.mode === "chase" && s.status === "running" && !s.moving ? s.nextUpdateAt : 0,
+      roundEndsAt: s.mode === "classic" && s.status === "running" && !s.moving ? s.roundEndsAt : 0,
       serverNow: Date.now(),
       players: this.ctx.getWebSockets().length,
+      moving: s.moving,
+      lastMoveAt: s.lastMoveAt,
       // revealedTrail には決着済みラウンドの位置しか入れていないので、そのまま公開してよい
       revealedTrail: s.revealedTrail,
       history: s.history,

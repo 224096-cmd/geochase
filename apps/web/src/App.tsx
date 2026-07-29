@@ -31,6 +31,9 @@ const SETTINGS_KEY = "geochase.settings.v1";
 const ROOM_KEY = "geochase.room.v1";
 const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{4,64}$/;
 
+/** 正解したあと、答えのピンを何ミリ秒残すか。すぐ消すと「見えなかった」になる */
+const REVEAL_HOLD_MS = 5000;
+
 const DEFAULT_SETTINGS: StartOptions = {
   mode: "chase",
   region: "japan_wide",
@@ -98,6 +101,10 @@ export default function App() {
   const [tick, setTick] = useState(0);
 
   const lastRoundKey = useRef("");
+  const lastMoveSeen = useRef(0);
+  /** 表示中の結果をエフェクト内から読むためのミラー */
+  const resultRef = useRef<GuessResult | null>(null);
+  resultRef.current = result;
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -137,7 +144,8 @@ export default function App() {
       .catch(() => setRegions([{ key: "japan_wide", label: "日本全国" }]));
   }, []);
 
-  /* ラウンドが変わったら表示をリセット */
+  /* ラウンドが変わったら表示をリセット。
+     ただし正解直後の答え合わせは数秒残す（すぐ消えると何も見えないため） */
   useEffect(() => {
     if (!state) return;
     const key = `${state.status}:${state.round}:${state.imageId}`;
@@ -146,11 +154,31 @@ export default function App() {
 
     setStreetSource("live");
     setExplore(null);
+
     if (state.status === "running") {
-      setResult(null);
       setGuessPin(null);
+      const shown = resultRef.current;
+      if (shown?.correct) {
+        window.setTimeout(() => setResult((r) => (r === shown ? null : r)), REVEAL_HOLD_MS);
+      } else {
+        setResult(null);
+      }
     }
   }, [state]);
+
+  /* 逃走者が移動したら知らせる。地図の軌跡ピンもこのタイミングで1つ増える */
+  useEffect(() => {
+    if (!state?.lastMoveAt) return;
+    if (lastMoveSeen.current === 0) {
+      lastMoveSeen.current = state.lastMoveAt;
+      return;
+    }
+    if (state.lastMoveAt === lastMoveSeen.current) return;
+    lastMoveSeen.current = state.lastMoveAt;
+    if (state.mode === "chase" && state.status === "running" && state.round > 1) {
+      showToast("逃走者が移動しました。軌跡のピンが1つ増えています");
+    }
+  }, [state?.lastMoveAt, state?.mode, state?.status, state?.round, showToast]);
 
   /* カウントダウンのティック。表示はサーバー時刻から計算するのでズレない */
   useEffect(() => {
@@ -225,7 +253,7 @@ export default function App() {
 
   const shareResult = useCallback(async () => {
     if (!state) return;
-    const modeLabel = state.mode === "chase" ? "AI逃走モード" : "通常モード";
+    const modeLabel = state.mode === "chase" ? "逃走モード" : "通常モード";
     const text = `GeoChase で ${formatScore(state.totalScore)} 点（${modeLabel} / ${state.round}ラウンド）`;
     const url = `${window.location.origin}${window.location.pathname}`;
     try {
@@ -287,6 +315,7 @@ export default function App() {
   const isReveal = state?.status === "reveal";
   const isFinished = state?.status === "finished";
   const isIdle = !state || state.status === "idle";
+  const isMoving = Boolean(state?.moving);
 
   const countdown = useMemo(() => {
     void tick;
@@ -350,9 +379,9 @@ export default function App() {
             type="button"
             className="primary-btn"
             onClick={isRunning ? handleStop : handleStart}
-            disabled={busy || connection === "offline"}
+            disabled={busy || isMoving || connection === "offline"}
           >
-            {isIdle ? "スタート" : isRunning ? "ストップ" : "もう一度"}
+            {busy ? "準備中…" : isIdle ? "スタート" : isRunning ? "ストップ" : "もう一度"}
           </button>
         </div>
       </header>
@@ -381,11 +410,22 @@ export default function App() {
         </div>
 
         <div className="readout-cell readout-timer">
-          <span className="readout-label">{countdown?.label ?? "待機中"}</span>
-          <span className={`readout-value${countdown ? "" : " is-empty"}`}>
-            {countdown ? formatClock(countdown.seconds) : "—"}
+          <span className="readout-label">{isMoving ? "状況" : countdown?.label ?? "待機中"}</span>
+          <span className={`readout-value${isMoving || countdown ? "" : " is-empty"}`}>
+            {isMoving ? (
+              <span className="readout-moving">
+                <span className="street-spinner is-tiny" aria-hidden="true" />
+                移動中
+              </span>
+            ) : countdown ? (
+              formatClock(countdown.seconds)
+            ) : (
+              "—"
+            )}
           </span>
-          {countdown && <span className="readout-bar" style={{ transform: `scaleX(${countdown.ratio})` }} />}
+          {!isMoving && countdown && (
+            <span className="readout-bar" style={{ transform: `scaleX(${countdown.ratio})` }} />
+          )}
         </div>
       </div>
 
@@ -420,7 +460,12 @@ export default function App() {
                 </div>
               )
             )}
-            <StreetView imageId={displayed.imageId} imageUrl={displayed.imageUrl} compact={streetCompact} />
+            <StreetView
+              imageId={displayed.imageId}
+              imageUrl={displayed.imageUrl}
+              compact={streetCompact}
+              apiUrl={API_URL}
+            />
           </section>
 
           <section className="pane pane-map" onClick={() => setFocusedPane("map")} aria-label="地図">
@@ -430,12 +475,21 @@ export default function App() {
               markerPosition={guessPin}
               targetPosition={result?.target ?? null}
               trail={state?.revealedTrail ?? []}
-              locked={!isRunning}
+              locked={!isRunning || isMoving}
               compact={mapCompact}
-              onExplore={guessPin && isRunning ? exploreHere : undefined}
+              onExplore={guessPin && isRunning && !isMoving ? exploreHere : undefined}
               exploreLoading={exploreLoading}
             />
           </section>
+
+          {/* 次の地点を探している間は、画面が固まったように見えないよう明示する */}
+          {(isMoving || busy) && (
+            <div className="stage-overlay" role="status">
+              <span className="street-spinner" aria-hidden="true" />
+              <strong>{busy ? "ゲームを準備しています" : "逃走者が移動しています"}</strong>
+              <span>次の地点の写真を探しています。数秒かかることがあります</span>
+            </div>
+          )}
 
           {result && (
             <div className={`result ${result.correct ? "is-correct" : "is-miss"}`} role="status">
@@ -468,7 +522,7 @@ export default function App() {
                     onChange={(e) => setSettings((s) => ({ ...s, mode: e.target.value as Mode }))}
                     disabled={isRunning}
                   >
-                    <option value="chase">AI逃走モード</option>
+                    <option value="chase">逃走モード</option>
                     <option value="classic">通常モード</option>
                   </select>
                 </label>
@@ -490,7 +544,7 @@ export default function App() {
 
                 {settings.mode === "chase" ? (
                   <label className="field">
-                    <span>AIが移動する間隔</span>
+                    <span>逃走者が移動する間隔</span>
                     <select
                       value={settings.intervalSeconds}
                       onChange={(e) => setSettings((s) => ({ ...s, intervalSeconds: Number(e.target.value) }))}
@@ -568,7 +622,7 @@ export default function App() {
                 <button type="button" className="ghost-btn wide" onClick={newRoom}>
                   新しいルームを作る
                 </button>
-                <p className="note">同じルームに入った人と、同じAIを一緒に追えます。</p>
+                <p className="note">同じルームに入った人と、同じ逃走者を一緒に追えます。</p>
 
                 <h2>アプリ</h2>
                 <InstallButton />
@@ -594,7 +648,7 @@ export default function App() {
                       type="button"
                       className="ghost-btn wide"
                       onClick={requestHint}
-                      disabled={!state || state.hintsAvailable === 0}
+                      disabled={!state || state.hintsAvailable === 0 || isMoving}
                     >
                       {state && state.hintsAvailable > 0 ? "次のヒントを開く（−250点）" : "これ以上ヒントはありません"}
                     </button>
@@ -657,16 +711,27 @@ export default function App() {
 
           <footer className="actionbar">
             {isReveal ? (
-              <button type="button" className="primary-btn wide" onClick={nextRound}>
-                次のラウンドへ
+              <button type="button" className="primary-btn wide" onClick={nextRound} disabled={isMoving}>
+                {isMoving ? "次の地点を探しています…" : "次のラウンドへ"}
               </button>
             ) : isFinished ? (
               <button type="button" className="primary-btn wide" onClick={handleStart} disabled={busy}>
                 もう一度あそぶ（合計 {formatScore(state?.totalScore ?? 0)}点）
               </button>
             ) : (
-              <button type="button" className="primary-btn wide" onClick={submitGuess} disabled={!guessPin || !isRunning}>
-                {!isRunning ? "スタートすると回答できます" : guessPin ? "ここだと回答する" : "地図をタップしてピンを置く"}
+              <button
+                type="button"
+                className="primary-btn wide"
+                onClick={submitGuess}
+                disabled={!guessPin || !isRunning || isMoving}
+              >
+                {isMoving
+                  ? "逃走者が移動中…"
+                  : !isRunning
+                  ? "スタートすると回答できます"
+                  : guessPin
+                  ? "ここだと回答する"
+                  : "地図をタップしてピンを置く"}
               </button>
             )}
           </footer>

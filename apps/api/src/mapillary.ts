@@ -4,6 +4,56 @@ const MAPILLARY_GRAPH_URL = "https://graph.mapillary.com/images";
 const NOMINATIM_URL = "https://nominatim.openstreetmap.org/reverse";
 const FETCH_TIMEOUT_MS = 8000;
 
+/* ------------------------------------------------------------------ *
+ * 「遊べる地点」の条件
+ *
+ * ここを満たさない地点は採用しない。
+ * これが無いと、写真が1〜2枚しか無い袋小路に出て
+ * 「少ししか動けない・視点も回せない」状態になる。
+ * ------------------------------------------------------------------ */
+
+/** 密度を測る半径(km)。この中に何枚あるかで「歩き回れるか」を判断する */
+const WALK_RADIUS_KM = 0.15;
+/** 半径内に最低これだけ画像が必要 */
+const MIN_NEIGHBORS = 6;
+/** 同じ撮影シーケンス(連続した並び)の最低枚数。前後に進めるかの目安 */
+const MIN_SEQUENCE_LENGTH = 8;
+
+/* ------------------------------------------------------------------ *
+ * 画質の条件
+ *
+ * Mapillaryは投稿型なので、2013年頃のガラケー画質から
+ * 最新の8K 360度カメラまで玉石混交。看板を読ませたいなら
+ * 「解像度」と「撮影年」で足切りするのがいちばん効く。
+ * ------------------------------------------------------------------ */
+
+/** 採用条件を段階的にゆるめる。上から順に試し、見つかった時点で採用する */
+interface QualityTier {
+  label: string;
+  /** 360度パノラマ必須か */
+  pano: boolean;
+  /** 元画像の最低横ピクセル数 */
+  minWidth: number;
+  /** 何年前までの撮影を許容するか（0 = 制限なし） */
+  freshYears: number;
+  /** 周囲の画像密度・シーケンス長の条件を課すか */
+  walkable: boolean;
+}
+
+const QUALITY_TIERS: QualityTier[] = [
+  // 5760x2880 = Insta360 X3 / GoPro Max クラス。看板がはっきり読める
+  { label: "best", pano: true, minWidth: 5760, freshYears: 5, walkable: true },
+  { label: "good", pano: true, minWidth: 4096, freshYears: 8, walkable: true },
+  { label: "fair", pano: true, minWidth: 2048, freshYears: 12, walkable: true },
+  // ここから平面写真も許容
+  { label: "flat", pano: false, minWidth: 2560, freshYears: 10, walkable: true },
+  { label: "any-walkable", pano: false, minWidth: 1600, freshYears: 0, walkable: true },
+  // 最後の妥協。何も見つからないよりはマシ
+  { label: "any", pano: false, minWidth: 0, freshYears: 0, walkable: false },
+];
+
+const YEAR_MS = 365.25 * 24 * 60 * 60 * 1000;
+
 // [minLng, minLat, maxLng, maxLat]
 type Bbox = [number, number, number, number];
 
@@ -131,28 +181,40 @@ interface RawImage {
   width?: number;
   height?: number;
   quality_score?: number;
+  /** 撮影シーケンスID。ここが同じ画像同士は前後に歩いて移動できる */
+  sequence?: string;
 }
 
-function toSpot(img: RawImage): StreetSpot {
+function coordOf(img: RawImage): LatLng {
   const [lng, lat] = img.computed_geometry?.coordinates ?? img.geometry.coordinates;
+  return { lat, lng };
+}
+
+function toSpot(img: RawImage, neighbors?: number): StreetSpot {
   return {
-    point: { lat, lng },
+    point: coordOf(img),
     // 静止画フォールバック用。看板が読めるよう可能な限り原寸に近いものを選ぶ
     imageUrl: img.thumb_original_url ?? img.thumb_2048_url ?? img.thumb_1024_url ?? "",
     imageId: img.id,
     isPano: Boolean(img.is_pano),
+    sequenceId: img.sequence,
+    neighbors,
+    width: img.width,
+    capturedAt: img.captured_at,
   };
 }
 
-async function searchOnce(token: string, center: LatLng, bboxDegrees: number, limit = 50): Promise<RawImage[]> {
+/** sequence を含めて取得する。前後に歩けるかの判定に必須 */
+const IMAGE_FIELDS =
+  "id,geometry,computed_geometry,thumb_original_url,thumb_2048_url,thumb_1024_url,is_pano,captured_at,width,height,quality_score,sequence";
+
+async function searchOnce(token: string, center: LatLng, bboxDegrees: number, limit = 100): Promise<RawImage[]> {
   if (!token) {
     console.error("MAPILLARY_TOKEN is not configured");
     return [];
   }
-  const fields =
-    "id,geometry,computed_geometry,thumb_original_url,thumb_2048_url,thumb_1024_url,is_pano,captured_at,width,height,quality_score";
   const bbox = buildBbox(center, bboxDegrees);
-  const url = `${MAPILLARY_GRAPH_URL}?access_token=${encodeURIComponent(token)}&fields=${fields}&bbox=${bbox}&limit=${limit}`;
+  const url = `${MAPILLARY_GRAPH_URL}?access_token=${encodeURIComponent(token)}&fields=${IMAGE_FIELDS}&bbox=${bbox}&limit=${limit}`;
   const res = await fetchWithTimeout(url);
   if (!res) return [];
   if (!res.ok) {
@@ -168,23 +230,109 @@ async function searchOnce(token: string, center: LatLng, bboxDegrees: number, li
   }
 }
 
-/**
- * 「遊べる画像」を上位に並べ替える。
- *  1. 360度パノラマ（視点を回せないと推理にならない）
- *  2. Mapillaryの品質スコアが高いもの
- *  3. 解像度が高いもの（看板や標識を読めるかどうかを左右する）
- * 同点のときはランダムなので、同じ場所ばかり出ることはない。
- */
-function scoreImage(img: RawImage): number {
-  const pano = img.is_pano ? 1_000_000 : 0;
-  const quality = Math.max(0, Math.min(1, img.quality_score ?? 0.5)) * 100_000;
-  const pixels = Math.min(1, (img.width ?? 2048) / 8000) * 10_000;
-  return pano + quality + pixels;
+/* ------------------------------------------------------------------ *
+ * 「歩き回れる地点」の評価
+ * ------------------------------------------------------------------ */
+
+/** 検索結果1回ぶんから、周辺密度とシーケンス長をまとめて出す */
+function analysePool(pool: RawImage[]) {
+  const points = pool.map(coordOf);
+  const sequenceLength = new Map<string, number>();
+  for (const img of pool) {
+    const key = img.sequence ?? "";
+    if (!key) continue;
+    sequenceLength.set(key, (sequenceLength.get(key) ?? 0) + 1);
+  }
+
+  const neighborsOf = (index: number) => {
+    const target = points[index];
+    let n = 0;
+    for (let i = 0; i < points.length; i++) {
+      if (i === index) continue;
+      if (haversineKmLocal(target, points[i]) <= WALK_RADIUS_KM) n++;
+    }
+    return n;
+  };
+
+  return { neighborsOf, sequenceLength };
 }
 
-function preferPanorama(images: RawImage[]): RawImage[] {
-  // 先にシャッフルしてから安定ソートすることで、同スコア内の順序をランダムにする
-  return shuffle(images).sort((a, b) => scoreImage(b) - scoreImage(a));
+/** 何年前の写真か */
+function ageYears(img: RawImage): number {
+  if (!img.captured_at) return 99;
+  return (Date.now() - img.captured_at) / YEAR_MS;
+}
+
+/**
+ * 地点としての「遊べる度」を採点する。重みの大きい順に:
+ *  1. 360度パノラマ（視点を回せないと推理にならない）
+ *  2. 解像度（看板・標識が読めるかを直接左右する。ここを最重視した）
+ *  3. 撮影の新しさ（新しいほどカメラが良く、街並みも現在に近い）
+ *  4. 周囲150m以内の画像枚数（多いほど歩き回れる）
+ *  5. 同じシーケンスの長さ（長いほど前後にどこまでも進める）
+ *  6. Mapillaryの品質スコア
+ */
+function playabilityScore(img: RawImage, neighbors: number, seqLength: number): number {
+  const pano = img.is_pano ? 4_000_000 : 0;
+
+  // 8000px で満点。2048px なら 1/4 しか入らない
+  const resolution = Math.min(1, (img.width ?? 1024) / 8000) * 1_500_000;
+
+  // 1年以内なら満点、10年前で0
+  const freshness = Math.max(0, 1 - ageYears(img) / 10) * 900_000;
+
+  const density = Math.min(neighbors, 30) * 20_000;
+  const sequence = Math.min(seqLength, 30) * 13_000;
+  const quality = Math.max(0, Math.min(1, img.quality_score ?? 0.5)) * 200_000;
+
+  return pano + resolution + freshness + density + sequence + quality;
+}
+
+interface RankedSpot {
+  spot: StreetSpot;
+  neighbors: number;
+  seqLength: number;
+  ageYears: number;
+  score: number;
+}
+
+/** 検索結果を「遊べる順」に並べ替える。同点はランダムなので同じ場所ばかりにはならない */
+function rankSpots(pool: RawImage[]): RankedSpot[] {
+  if (pool.length === 0) return [];
+  const shuffled = shuffle(pool);
+  const { neighborsOf, sequenceLength } = analysePool(shuffled);
+
+  return shuffled
+    .map((img, i) => {
+      const neighbors = neighborsOf(i);
+      const seqLength = sequenceLength.get(img.sequence ?? "") ?? 1;
+      return {
+        spot: toSpot(img, neighbors),
+        neighbors,
+        seqLength,
+        ageYears: ageYears(img),
+        score: playabilityScore(img, neighbors, seqLength),
+      };
+    })
+    .sort((a, b) => b.score - a.score);
+}
+
+/** そのティアの条件を満たしているか */
+function meetsTier(r: RankedSpot, tier: QualityTier): boolean {
+  if (tier.pano && !r.spot.isPano) return false;
+  if (tier.minWidth > 0 && (r.spot.width ?? 0) < tier.minWidth) return false;
+  if (tier.freshYears > 0 && r.ageYears > tier.freshYears) return false;
+  if (tier.walkable && (r.neighbors < MIN_NEIGHBORS || r.seqLength < MIN_SEQUENCE_LENGTH)) return false;
+  return true;
+}
+
+/** 候補の中から、条件のきついティアから順に探す */
+function pickByTier(ranked: RankedSpot[], tiers: QualityTier[], accept: (r: RankedSpot) => boolean): RankedSpot | null {
+  for (const tier of tiers) {
+    const hit = ranked.find((r) => meetsTier(r, tier) && accept(r));
+    if (hit) return hit;
+  }
+  return null;
 }
 
 /** 検索が完全に失敗した場合の最終フォールバック: 地方内の完全ランダム座標(画像なし) */
@@ -194,8 +342,12 @@ export function randomFallbackPoint(region: RegionKey): LatLng {
 
 /**
  * 指定した地方の中からランダムな座標を選び、その近くのMapillary画像を探す。
- * 見つからなければ地方内の別のランダム座標で再試行する（最大10回）。
- * avoidPoints に近すぎる候補は避けて、同じ場所が連続で選ばれないようにする。
+ *
+ * 探索は「良い条件で何度も引き直す」方式。
+ *   序盤(0-5回目)  … QUALITY_TIERS の上位2段だけ（高解像度の360度写真）
+ *   中盤(6-9回目)  … 上位4段まで
+ *   終盤(10回目〜) … 全段（最後は妥協）
+ * 引き直す回数を増やすほど画質は上がるが、そのぶん探索に時間がかかる。
  */
 export async function findStreetPoint(
   token: string,
@@ -205,50 +357,102 @@ export async function findStreetPoint(
   const minSeparationKm = region === "world" ? 50 : 5;
   let lastResort: StreetSpot | null = null;
 
-  for (let attempt = 0; attempt < 10; attempt++) {
+  for (let attempt = 0; attempt < 14; attempt++) {
     const center = randomPointInRegion(region);
     // 序盤は狭く探して密集地(=見応えのある場所)を狙い、外れ続けたら広げる
-    const radius = attempt < 4 ? 0.03 : attempt < 7 ? 0.08 : 0.15;
+    const radius = attempt < 5 ? 0.03 : attempt < 10 ? 0.08 : 0.15;
     const candidates = await searchOnce(token, center, radius);
     if (candidates.length === 0) continue;
 
-    const ordered = preferPanorama(candidates);
-    if (!lastResort) lastResort = toSpot(ordered[0]);
+    const ranked = rankSpots(candidates);
+    if (!lastResort && ranked[0]) lastResort = ranked[0].spot;
 
-    for (const c of ordered) {
-      const spot = toSpot(c);
-      const tooClose = avoidPoints.some((p) => haversineKmLocal(p, spot.point) < minSeparationKm);
-      if (!tooClose) return spot;
-    }
+    const depth = attempt < 6 ? 2 : attempt < 10 ? 4 : QUALITY_TIERS.length;
+    const notTooClose = (r: RankedSpot) =>
+      !avoidPoints.some((p) => haversineKmLocal(p, r.spot.point) < minSeparationKm);
+
+    const hit = pickByTier(ranked, QUALITY_TIERS.slice(0, depth), notTooClose);
+    if (hit) return hit.spot;
   }
   return lastResort;
 }
 
+/* ------------------------------------------------------------------ *
+ * 逃走者の移動ロジック（ルールベース。機械学習・LLMは使っていない）
+ * ------------------------------------------------------------------ */
+
 /**
- * AI逃走モードの移動先を決める。
- * ・75%: 直前の進行方向を引き継いで前進（±60度のブレ）→ 逃走ルートが直線的に読める
- * ・25%: 同じ地方内へワープ（追跡が完全に詰むのを防ぐ揺さぶり）
+ * どの方角へ逃げるかを決める。
+ *  - 追跡者の回答がまだ遠い(30km超) … これまでの進行方向を維持して直線的に逃げる
+ *  - 詰められている(30km以内)       … 一番近い回答から見て「遠ざかる向き」へ舵を切る
+ * どちらも±ブレを入れて、完全に読み切られないようにする。
+ */
+function escapeBearing(current: LatLng, pursuers: LatLng[], lastBearing: number | null): { bearing: number; pressureKm: number } {
+  const drift = () => Math.random() * 120 - 60;
+
+  if (pursuers.length === 0) {
+    return { bearing: ((lastBearing ?? Math.random() * 360) + drift() + 360) % 360, pressureKm: Infinity };
+  }
+
+  let nearest = pursuers[0];
+  let pressureKm = Infinity;
+  for (const p of pursuers) {
+    const d = haversineKmLocal(p, current);
+    if (d < pressureKm) {
+      pressureKm = d;
+      nearest = p;
+    }
+  }
+
+  if (pressureKm > 30) {
+    return { bearing: ((lastBearing ?? Math.random() * 360) + drift() + 360) % 360, pressureKm };
+  }
+
+  // 追跡者 → 現在地 の向きへ進めば、そのまま離れていく
+  const away = bearingDeg(nearest, current);
+  // 詰められているほどブレを小さくして、まっすぐ逃げる
+  const spread = pressureKm < 5 ? 40 : 80;
+  return { bearing: (away + (Math.random() * spread - spread / 2) + 360) % 360, pressureKm };
+}
+
+/**
+ * 逃走者の移動先を決める。
+ *  ・通常     : 逃走方向へ 0.6〜4km 前進（見つかりにくいが追える距離）
+ *  ・詰められた: 遠くへワープする確率が上がる
  * 画像が見つからなければ距離を変えて数回リトライする。
+ *
+ * pursuers には「そのラウンドで実際に送られてきた回答座標」を渡す。
+ * これにより、当てずっぽうでなく“追われている方向から離れる”動きになる。
  */
 export async function moveAI(
   token: string,
   region: RegionKey,
   current: LatLng,
   avoidPoints: LatLng[],
-  lastBearing: number | null
+  lastBearing: number | null,
+  pursuers: LatLng[] = []
 ): Promise<(StreetSpot & { bearing: number }) | null> {
-  const shouldJump = Math.random() < 0.25;
+  const { bearing: baseBearing, pressureKm } = escapeBearing(current, pursuers, lastBearing);
+
+  // 追い詰められているほどワープしやすくする（0.2 〜 0.55）
+  const jumpChance = pressureKm < 5 ? 0.55 : pressureKm < 30 ? 0.35 : 0.2;
+  const shouldJump = Math.random() < jumpChance;
 
   if (!shouldJump) {
-    const base = lastBearing ?? Math.random() * 360;
-    for (const distanceKm of [1.2, 2.4, 0.6, 4.0]) {
-      const bearing = (base + (Math.random() * 120 - 60) + 360) % 360;
+    // 近距離から順に試す。詰められているときは遠くから試す
+    const steps = pressureKm < 5 ? [4.0, 2.4, 1.2, 0.6] : [1.2, 2.4, 0.6, 4.0];
+    for (const distanceKm of steps) {
+      const bearing = (baseBearing + (Math.random() * 30 - 15) + 360) % 360;
       const nextPoint = destinationPoint(current, bearing, distanceKm);
-      const nearby = await searchOnce(token, nextPoint, 0.02, 30);
-      if (nearby.length > 0) {
-        const spot = toSpot(preferPanorama(nearby)[0]);
-        return { ...spot, bearing: bearingDeg(current, spot.point) };
-      }
+      // 半径を少し広げて候補を増やし、密度判定が効くようにする
+      const nearby = await searchOnce(token, nextPoint, 0.03, 60);
+      if (nearby.length === 0) continue;
+
+      const ranked = rankSpots(nearby);
+      // 移動先も同じ基準で選ぶ。ここで妥協すると画質がガタ落ちする
+      const picked = pickByTier(ranked, QUALITY_TIERS, () => true) ?? ranked[0];
+      if (!picked) continue;
+      return { ...picked.spot, bearing: bearingDeg(current, picked.spot.point) };
     }
   }
 
@@ -257,34 +461,64 @@ export async function moveAI(
   return { ...jumped, bearing: bearingDeg(current, jumped.point) };
 }
 
-/** 探索モード用: クリックした地点に一番近い画像を返す */
-export async function nearestImage(token: string, point: LatLng): Promise<StreetSpot | null> {
-  for (const radius of [0.008, 0.02, 0.06, 0.15]) {
+/* ------------------------------------------------------------------ *
+ * 任意地点の画像探索（下見・別の道へ・360度を探す・鮮明な写真を探す）
+ * ------------------------------------------------------------------ */
+
+export interface NearestOptions {
+  /** 360度パノラマだけを対象にする */
+  panoOnly?: boolean;
+  /** 元画像の最低横ピクセル数。「もっと鮮明な写真を探す」で使う */
+  minWidth?: number;
+  /** この画像IDは選ばない（同じ場所に戻らないように） */
+  excludeId?: string;
+  /** このシーケンスは選ばない（別の道へ移りたいとき） */
+  excludeSequenceId?: string;
+  /** これより近い画像は選ばない(km)。0.05なら50m以上離れた画像になる */
+  minKm?: number;
+  /** 検索半径(度)の開始値 */
+  startRadius?: number;
+}
+
+/** クリック地点／現在地に近い画像を返す。条件に合うものが無ければ段階的にゆるめる */
+export async function nearestImage(token: string, point: LatLng, opts: NearestOptions = {}): Promise<StreetSpot | null> {
+  const { panoOnly = false, minWidth = 0, excludeId, excludeSequenceId, minKm = 0, startRadius = 0.008 } = opts;
+  const radii = [startRadius, startRadius * 2.5, startRadius * 7, startRadius * 18];
+
+  let relaxed: StreetSpot | null = null;
+
+  for (const radius of radii) {
     const candidates = await searchOnce(token, point, radius);
     if (candidates.length === 0) continue;
 
-    // まずパノラマだけで最寄りを探し、無ければ平面写真から選ぶ
-    const panos = candidates.filter((c) => c.is_pano);
-    const pool = panos.length > 0 ? panos : candidates;
+    const usable = candidates.filter((c) => {
+      if (excludeId && c.id === excludeId) return false;
+      if (excludeSequenceId && c.sequence && c.sequence === excludeSequenceId) return false;
+      return true;
+    });
+    if (usable.length === 0) continue;
 
-    let best = pool[0];
-    let bestDist = Infinity;
-    for (const c of pool) {
-      const spot = toSpot(c);
-      const d = haversineKmLocal(point, spot.point);
-      if (d < bestDist) {
-        bestDist = d;
-        best = c;
-      }
-    }
-    return toSpot(best);
+    let pool = usable;
+    if (panoOnly) pool = pool.filter((c) => c.is_pano);
+    if (minWidth > 0) pool = pool.filter((c) => (c.width ?? 0) >= minWidth);
+    const target = pool.length > 0 ? pool : usable;
+
+    // 距離順に見て、minKm を満たす最初のものを採用する
+    const sorted = target
+      .map((c) => ({ img: c, d: haversineKmLocal(point, coordOf(c)) }))
+      .sort((a, b) => a.d - b.d);
+
+    if (!relaxed && sorted[0]) relaxed = toSpot(sorted[0].img);
+
+    const hit = sorted.find((s) => s.d >= minKm);
+    if (hit) return toSpot(hit.img);
   }
-  return null;
+
+  return relaxed;
 }
 
 /**
  * 現在地から指定した方位・距離だけ離れた地点を球面三角法で計算する。
- * 以前はOSRMの公開デモサーバーで道路にスナップしていたが、商用利用不可のため廃止。
  * 移動先の座標をそのままMapillaryで検索すれば、Mapillaryの画像自体が
  * 道路・歩道沿いに撮影されているため、結果的に道路沿いの地点に着地する。
  */

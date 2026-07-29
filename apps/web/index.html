@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#070C0B" />
-    <meta name="description" content="GeoChase: ストリートビューで場所を当てる位置推理ゲーム。移動するAIを追跡する「AI逃走モード」も搭載。" />
+    <meta name="description" content="GeoChase: ストリートビューで場所を当てる位置推理ゲーム。移動し続ける逃走者を追いかける「逃走モード」も搭載。" />
 
     <!-- iOSのホーム画面アプリ用。manifestだけでは全画面表示にならない -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -17,8 +17,8 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
 
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="GeoChase - 場所当て×AI追跡ゲーム" />
-    <meta property="og:description" content="ストリート画像だけを頼りに場所を推理。移動し続けるAIを追いつめよう。" />
+    <meta property="og:title" content="GeoChase - 場所当て×追跡ゲーム" />
+    <meta property="og:description" content="ストリート画像だけを頼りに場所を推理。移動し続ける逃走者を追いつめよう。" />
     <meta property="og:image" content="/icon-512.png" />
     <meta name="twitter:card" content="summary" />
 
@@ -28,7 +28,7 @@
     -->
     <meta name="google-site-verification" content="oHmE_f6ogd0ZE4WmHBdncsZGod_A0JaotcU5iLCqmXA" />
 
-    <title>GeoChase - 場所当て×AI追跡ゲーム</title>
+    <title>GeoChase - 場所当て×追跡ゲーム</title>
   </head>
   <body>
     <div id="root"></div>
@@ -44,9 +44,12 @@
       admaxは document.write で挿入するため async は付けられない（付けると何も表示されない）。
       ・スマホ(320x50相当) → 画面下のバー
       ・PC レクタングル(300x250) → 右パネルの下（position:fixed）
-      表示切り替えはCSS側で行う。
+
+      高さは CSS で予約しない。main.tsx の trackAdBar() が実寸を測って
+      --ad-h に入れ、配信が無ければ .is-empty を付けて枠ごと畳む。
+      （固定50pxを予約していたのが「広告の下の黒い空白」の原因だった）
     -->
-    <div class="ad-bar">
+    <div class="ad-bar is-empty">
       <div id="ad-sp">
         <!-- admax -->
         <script src="https://adm.shinobi.jp/s/4b552c0531166d62690915a9f9ce5c62"></script>

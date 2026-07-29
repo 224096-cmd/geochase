@@ -52,13 +52,39 @@ export default {
       return Response.json(list, { headers: { ...headers, "Cache-Control": "public, max-age=3600" } });
     }
 
+    /**
+     * 任意地点の画像を探す。用途は4つ。
+     *   下見             : /nearby-image?lat=..&lng=..
+     *   別の道へ         : /nearby-image?lat=..&lng=..&exclude=<id>&excludeSeq=<seq>&minKm=0.05
+     *   360度写真を探す  : /nearby-image?lat=..&lng=..&pano=1
+     *   鮮明な写真を探す : /nearby-image?lat=..&lng=..&minWidth=5760&exclude=<id>
+     */
     if (url.pathname === "/nearby-image") {
-      const lat = Number(url.searchParams.get("lat"));
-      const lng = Number(url.searchParams.get("lng"));
+      const q = url.searchParams;
+      const lat = Number(q.get("lat"));
+      const lng = Number(q.get("lng"));
       if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
         return Response.json({ found: false, error: "緯度経度が不正です" }, { status: 400, headers });
       }
-      const result = await nearestImage(env.MAPILLARY_TOKEN, { lat, lng });
+
+      const minKmRaw = Number(q.get("minKm"));
+      const minWidthRaw = Number(q.get("minWidth"));
+      const wantsWide = q.get("pano") === "1" || Number.isFinite(minWidthRaw);
+
+      const result = await nearestImage(
+        env.MAPILLARY_TOKEN,
+        { lat, lng },
+        {
+          panoOnly: q.get("pano") === "1",
+          minWidth: Number.isFinite(minWidthRaw) ? Math.max(0, Math.min(16384, minWidthRaw)) : 0,
+          excludeId: q.get("exclude") ?? undefined,
+          excludeSequenceId: q.get("excludeSeq") ?? undefined,
+          minKm: Number.isFinite(minKmRaw) ? Math.max(0, Math.min(5, minKmRaw)) : 0,
+          // 条件を絞るときは、はじめから広めに探さないと候補が枯れる
+          startRadius: wantsWide ? 0.02 : 0.008,
+        }
+      );
+
       if (!result) {
         return Response.json({ found: false, error: "この付近には画像がありません" }, { headers });
       }

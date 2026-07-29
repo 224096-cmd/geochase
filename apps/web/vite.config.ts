@@ -28,9 +28,9 @@ export default defineConfig({
       includeAssets: ["icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png", "favicon.svg", "robots.txt"],
       manifest: {
         id: "/",
-        name: "GeoChase - 場所当て×AI追跡ゲーム",
+        name: "GeoChase - 場所当て×追跡ゲーム",
         short_name: "GeoChase",
-        description: "ストリート画像で場所を当てる位置推理ゲーム。移動し続けるAIを追跡する逃走モード付き。",
+        description: "ストリート画像で場所を当てる位置推理ゲーム。移動し続ける逃走者を追跡する逃走モード付き。",
         lang: "ja",
         dir: "ltr",
         theme_color: "#070C0B",
@@ -48,7 +48,7 @@ export default defineConfig({
           { src: "icon-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
         ],
         shortcuts: [
-          { name: "AI逃走モードで始める", short_name: "逃走", url: "/?mode=chase" },
+          { name: "逃走モードで始める", short_name: "逃走", url: "/?mode=chase" },
           { name: "通常モードで始める", short_name: "通常", url: "/?mode=classic" },
         ],
       },
@@ -75,21 +75,27 @@ export default defineConfig({
             },
           },
           {
-            // 地図タイル: 一度見た範囲はオフラインでも表示できるようにする
-            urlPattern: /^https:\/\/tile\.openstreetmap\.org\/.*/i,
+            // 地図・写真タイル（地理院タイル）。
+            // OSM公式タイルは利用ポリシー上アプリ配布に使えないため、
+            // MapView.tsx ごと地理院タイルへ移行した。ここも合わせて差し替える。
+            // 「一度見た範囲を再訪時に使い回す」だけの通常キャッシュで、
+            // 先読み・一括ダウンロードはしていない。
+            urlPattern: /^https:\/\/cyberjapandata\.gsi\.go\.jp\/xyz\/.*/i,
             handler: "CacheFirst",
             options: {
-              cacheName: "osm-tiles",
-              expiration: { maxEntries: 600, maxAgeSeconds: 60 * 60 * 24 * 14 },
+              cacheName: "gsi-tiles",
+              expiration: { maxEntries: 800, maxAgeSeconds: 60 * 60 * 24 * 14 },
               cacheableResponse: { statuses: [0, 200] },
             },
           },
           {
-            urlPattern: /^https:\/\/gibs\.earthdata\.nasa\.gov\/.*/i,
+            // VITE_WORLD_* で世界タイル（ArcGIS等）を設定したとき用。
+            // 未設定ならこのパターンは一度も一致しないので害はない。
+            urlPattern: /^https:\/\/.*\.arcgis\.com\/.*/i,
             handler: "CacheFirst",
             options: {
-              cacheName: "gibs-tiles",
-              expiration: { maxEntries: 400, maxAgeSeconds: 60 * 60 * 24 * 7 },
+              cacheName: "world-tiles",
+              expiration: { maxEntries: 500, maxAgeSeconds: 60 * 60 * 24 * 14 },
               cacheableResponse: { statuses: [0, 200] },
             },
           },

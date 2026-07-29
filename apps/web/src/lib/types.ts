@@ -7,6 +7,11 @@ export interface LatLng {
   lng: number;
 }
 
+/** 公開済みの軌跡。round があればツールチップに正しいラウンド番号を出せる */
+export interface TrailPoint extends LatLng {
+  round?: number;
+}
+
 export interface RoundRecord {
   round: number;
   target: LatLng;
@@ -37,7 +42,11 @@ export interface RoomState {
   roundEndsAt: number;
   serverNow: number;
   players: number;
-  revealedTrail: LatLng[];
+  /** サーバーが次の地点を探している最中。UIに「移動中」を出す */
+  moving?: boolean;
+  /** 直近の移動完了時刻。変化を検知して通知を出す */
+  lastMoveAt?: number;
+  revealedTrail: TrailPoint[];
   history: RoundRecord[];
 }
 

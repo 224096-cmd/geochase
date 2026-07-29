@@ -11,6 +11,11 @@ export interface LatLng {
   lng: number;
 }
 
+/** 公開済みの軌跡。どのラウンドの位置かが分かるようにroundを持たせる */
+export interface TrailPoint extends LatLng {
+  round: number;
+}
+
 export type RegionKey =
   | "hokkaido"
   | "tohoku"
@@ -30,7 +35,7 @@ export type GameStatus = "idle" | "running" | "reveal" | "finished";
 export interface StartRequestBody {
   mode?: GameMode;
   region?: RegionKey;
-  intervalSeconds?: number; // AI逃走モードの移動間隔(秒)
+  intervalSeconds?: number; // 逃走モードの移動間隔(秒)
   timeLimitSeconds?: number; // 通常モードの1ラウンド制限時間(秒)。最大1800(30分)
   rounds?: number; // 通常モードのラウンド数(1〜10)
   playerName?: string;
@@ -42,6 +47,14 @@ export interface StreetSpot {
   imageUrl: string;
   imageId: string;
   isPano: boolean;
+  /** 同じ撮影シーケンスのID。前後に歩けるかの目安 */
+  sequenceId?: string;
+  /** 半径150m以内にある画像の枚数。少ないと「ほとんど動けない地点」 */
+  neighbors?: number;
+  /** 元画像の横ピクセル数。看板が読めるかを左右する */
+  width?: number;
+  /** 撮影日時(epoch ms)。新しいほどカメラが良く、画質も高い傾向 */
+  capturedAt?: number;
 }
 
 /** ラウンド終了後にクライアントへ公開する結果 */
@@ -54,7 +67,7 @@ export interface RoundRecord {
   caught: boolean;
 }
 
-/** サーバーがクライアントへ送る状態。正解座標(aiPosition)はラウンド終了まで含めない */
+/** サーバーがクライアントへ送る状態。正解座標(runnerPosition)はラウンド終了まで含めない */
 export interface PublicState {
   type?: "state";
   mode: GameMode;
@@ -77,8 +90,15 @@ export interface PublicState {
   roundEndsAt: number;
   serverNow: number;
   players: number;
-  /** 決着済みラウンドのAI位置のみ。進行中ラウンドの答えは含まない */
-  revealedTrail: LatLng[];
+  /**
+   * 次の地点をMapillaryから探している最中。
+   * 探索は数秒〜十数秒かかることがあるので、クライアントで「移動中」を出せるようにする。
+   */
+  moving: boolean;
+  /** 直近で逃走者が移動した時刻(epoch ms)。変化を検知して通知を出すために使う */
+  lastMoveAt: number;
+  /** 決着済みラウンドの逃走者位置のみ。進行中ラウンドの答えは含まない */
+  revealedTrail: TrailPoint[];
   history: RoundRecord[];
 }
 
