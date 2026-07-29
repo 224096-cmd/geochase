@@ -21,6 +21,17 @@ export interface RoundRecord {
   caught: boolean;
 }
 
+/** プレイヤー1人ぶんの成績。距離からの点は回答者ごとに独立して計算される */
+export interface PlayerScore {
+  id: string;
+  name: string | null;
+  total: number;
+  lastRound: number;
+  answered: number;
+  bestKm: number | null;
+  online: boolean;
+}
+
 export interface RoomState {
   type: "state";
   mode: Mode;
@@ -42,10 +53,12 @@ export interface RoomState {
   roundEndsAt: number;
   serverNow: number;
   players: number;
-  /** いちばん先に入室した人のID。設定変更と開始・停止はこの人だけができる */
+  /** 設定変更・開始・停止・次のラウンドができる人のID */
   hostId?: string | null;
   /** 通常モードで、このラウンドに回答済みの人数 */
   answered?: number;
+  /** 累計スコア順のプレイヤー一覧 */
+  scoreboard?: PlayerScore[];
   /** サーバーが次の地点を探している最中 */
   moving?: boolean;
   /** 直近の移動完了時刻。変化を検知して通知を出す */
@@ -76,7 +89,13 @@ export interface CaughtMessage {
   score: number;
 }
 
-export type ServerMessage = RoomState | GuessResult | CaughtMessage;
+/** ホスト以外が操作したときなど、自分にだけ届く短いお知らせ */
+export interface NoticeMessage {
+  type: "notice";
+  message: string;
+}
+
+export type ServerMessage = RoomState | GuessResult | CaughtMessage | NoticeMessage;
 
 export interface StartOptions {
   mode: Mode;

@@ -7,6 +7,7 @@ import type {
   GameMode,
   GameStatus,
   PublicState,
+  PlayerScore,
   RoundRecord,
   ClientMessage,
 } from "./types";
@@ -34,15 +35,19 @@ const RETRY_PENALTY = 60; // 逃走モードで外すたびの減点
 const GUESS_COOLDOWN_MS = 1500;
 /** 逃走判断に使う直近の回答数 */
 const PURSUIT_MEMORY = 6;
+/** 順位表に載せる人数の上限 */
+const SCOREBOARD_LIMIT = 30;
 
 /** WebSocketに紐づけるプレイヤー情報。ハイバネーションを跨いで保持される */
 interface PlayerAttachment {
   playerId: string;
+  name: string | null;
   joinedAt: number;
 }
 
 /** 通常モードで1人ぶんの回答 */
 interface ClassicAnswer {
+  name: string | null;
   guess: LatLng;
   distanceKm: number;
   score: number;
@@ -78,6 +83,8 @@ interface RoomState {
   roundGuesses: LatLng[];
   /** 通常モードで、このラウンドに誰がどう答えたか */
   classicAnswers: Record<string, ClassicAnswer>;
+  /** プレイヤーごとの累計成績。順位はここから作る */
+  scoreboard: Record<string, PlayerScore>;
 }
 
 const DEFAULT_STATE: RoomState = {
@@ -108,6 +115,7 @@ const DEFAULT_STATE: RoomState = {
   lastMoveAt: 0,
   roundGuesses: [],
   classicAnswers: {},
+  scoreboard: {},
 };
 
 export class GameRoom extends DurableObject<Env> {
@@ -130,6 +138,7 @@ export class GameRoom extends DurableObject<Env> {
       }));
       this.gameState.roundGuesses = this.gameState.roundGuesses ?? [];
       this.gameState.classicAnswers = this.gameState.classicAnswers ?? {};
+      this.gameState.scoreboard = this.gameState.scoreboard ?? {};
       // 途中で落ちたときに「移動中」のまま固まらないようにする
       this.gameState.moving = false;
     });
@@ -177,10 +186,99 @@ export class GameRoom extends DurableObject<Env> {
     return n;
   }
 
+  /** いま接続しているプレイヤーIDの集合 */
+  private onlineIds(exclude?: WebSocket): Set<string> {
+    const set = new Set<string>();
+    for (const ws of this.ctx.getWebSockets()) {
+      if (ws === exclude) continue;
+      const a = this.attachmentOf(ws);
+      if (a) set.add(a.playerId);
+    }
+    return set;
+  }
+
+  /** ホストでなければ true を返し、本人に理由を伝える */
+  private denyIfNotHost(ws: WebSocket, action: string): boolean {
+    const host = this.hostId();
+    if (!host) return false; // 誰もいなければ制限しない
+    const me = this.attachmentOf(ws)?.playerId;
+    if (me === host) return false;
+    try {
+      ws.send(JSON.stringify({ type: "notice", message: `ホストだけが${action}できます` }));
+    } catch {
+      /* 送信できなくても進行に影響はない */
+    }
+    return true;
+  }
+
   /** 探索前に「移動中」を配信して、待ち時間を無反応にしない */
   private announceMoving(moving: boolean) {
     this.gameState.moving = moving;
     this.broadcast(this.publicState());
+  }
+
+  /* ---------------------------------------------------------------- *
+   * 成績（プレイヤーごと）
+   * ---------------------------------------------------------------- */
+
+  private ensurePlayer(id: string, name?: string | null): PlayerScore {
+    const existing = this.gameState.scoreboard[id];
+    if (existing) {
+      if (name && existing.name !== name) existing.name = name;
+      return existing;
+    }
+    const created: PlayerScore = {
+      id,
+      name: name ?? null,
+      total: 0,
+      lastRound: 0,
+      answered: 0,
+      bestKm: null,
+      online: true,
+    };
+    this.gameState.scoreboard[id] = created;
+    return created;
+  }
+
+  /** 距離から出した点をその人だけに加算する */
+  private awardScore(id: string, name: string | null | undefined, score: number, distanceKm: number | null) {
+    const p = this.ensurePlayer(id, name);
+    p.total += score;
+    p.lastRound = score;
+    p.answered += 1;
+    if (distanceKm !== null && (p.bestKm === null || distanceKm < p.bestKm)) p.bestKm = distanceKm;
+  }
+
+  /** 外れた回答。点は入らないが「どこまで近づけたか」は残す */
+  private noteAttempt(id: string, name: string | null | undefined, distanceKm: number) {
+    const p = this.ensurePlayer(id, name);
+    if (p.bestKm === null || distanceKm < p.bestKm) p.bestKm = distanceKm;
+  }
+
+  /** 新しいラウンドに入るとき、直近ラウンドの点だけ消す（累計は残す） */
+  private resetRoundScores() {
+    for (const p of Object.values(this.gameState.scoreboard)) p.lastRound = 0;
+  }
+
+  /** 累計スコア順。同点なら最短距離が近い人を上に */
+  private scoreboardList(exclude?: WebSocket): PlayerScore[] {
+    const online = this.onlineIds(exclude);
+    return Object.values(this.gameState.scoreboard)
+      .map((p) => ({ ...p, online: online.has(p.id) }))
+      .sort((a, b) => {
+        if (b.total !== a.total) return b.total - a.total;
+        const ak = a.bestKm ?? Infinity;
+        const bk = b.bestKm ?? Infinity;
+        return ak - bk;
+      })
+      .slice(0, SCOREBOARD_LIMIT);
+  }
+
+  /** ルームの代表スコア = 最高得点者の累計 */
+  private roomTopScore(): number {
+    let top = 0;
+    for (const p of Object.values(this.gameState.scoreboard)) if (p.total > top) top = p.total;
+    return top;
   }
 
   /* ---------------------------------------------------------------- *
@@ -192,11 +290,17 @@ export class GameRoom extends DurableObject<Env> {
 
     if (req.headers.get("Upgrade") === "websocket") {
       const playerId = url.searchParams.get("pid") || crypto.randomUUID();
+      const name = url.searchParams.get("name")?.slice(0, 20) || null;
+
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       this.ctx.acceptWebSocket(server);
       // 誰がいつ入ったかを覚えておく。ホストの決定に使う
-      server.serializeAttachment({ playerId, joinedAt: Date.now() } satisfies PlayerAttachment);
+      server.serializeAttachment({ playerId, name, joinedAt: Date.now() } satisfies PlayerAttachment);
+
+      // 回答前でも順位表に名前が出るよう、入室時点で登録しておく
+      this.ensurePlayer(playerId, name);
+
       server.send(JSON.stringify(this.publicState()));
       // 新しい人が入ったので、全員に人数とホストを配り直す
       this.broadcast(this.publicState());
@@ -205,7 +309,7 @@ export class GameRoom extends DurableObject<Env> {
 
     if (url.pathname.endsWith("/start") && req.method === "POST") {
       const body = await this.readStartBody(req);
-      const denied = this.rejectIfNotHost(body.playerId);
+      const denied = this.rejectIfNotHost(body.playerId, "開始");
       if (denied) return denied;
 
       if (body.mode === "classic") await this.startClassicGame(body.region, body.timeLimitSeconds, body.rounds);
@@ -220,7 +324,7 @@ export class GameRoom extends DurableObject<Env> {
       } catch {
         /* ボディなし */
       }
-      const denied = this.rejectIfNotHost(playerId);
+      const denied = this.rejectIfNotHost(playerId, "停止");
       if (denied) return denied;
 
       await this.stopGame();
@@ -235,14 +339,11 @@ export class GameRoom extends DurableObject<Env> {
   }
 
   /** ホスト以外の操作を弾く。誰も接続していないときは誰でも操作できる */
-  private rejectIfNotHost(playerId?: string): Response | null {
+  private rejectIfNotHost(playerId: string | undefined, action: string): Response | null {
     const host = this.hostId();
     if (!host) return null;
     if (playerId && playerId === host) return null;
-    return Response.json(
-      { ok: false, error: "ホストだけが開始・停止できます" },
-      { status: 403 }
-    );
+    return Response.json({ ok: false, error: `ホストだけが${action}できます` }, { status: 403 });
   }
 
   private async readStartBody(req: Request) {
@@ -287,21 +388,42 @@ export class GameRoom extends DurableObject<Env> {
       return;
     }
 
+    const attachment = this.attachmentOf(ws);
+
     switch (msg.type) {
       case "guess": {
         // 接続そのものに紐づくIDを優先する。
         // クライアント任せにすると全員が同じIDを送ってきて、
         // 連打防止が全員で共有されてしまう（実際にその不具合があった）
-        const id = this.attachmentOf(ws)?.playerId ?? msg.userId ?? "anon";
-        await this.handleGuess(ws, msg.lat, msg.lng, id, msg.playerName);
+        const id = attachment?.playerId ?? msg.userId ?? "anon";
+        const name = msg.playerName ?? attachment?.name ?? null;
+        await this.handleGuess(ws, msg.lat, msg.lng, id, name);
         break;
       }
+
       case "hint":
+        // ヒントは全員に公開され、減点も全員に等しくかかる。
+        // 順位は同じ条件で競うことになるので、誰が開いてもよい
         await this.revealNextHint();
         break;
+
       case "next":
+        // 次のラウンドへ進めるのはホストだけ
+        if (this.denyIfNotHost(ws, "次のラウンドへ進む")) return;
         await this.startNextClassicRound();
         break;
+
+      case "rename": {
+        const id = attachment?.playerId;
+        const name = String(msg.playerName ?? "").slice(0, 20).trim() || null;
+        if (!id) return;
+        ws.serializeAttachment({ ...attachment!, name });
+        this.ensurePlayer(id, name);
+        await this.persist();
+        this.broadcast(this.publicState());
+        break;
+      }
+
       case "sync":
         ws.send(JSON.stringify(this.publicState()));
         break;
@@ -330,7 +452,7 @@ export class GameRoom extends DurableObject<Env> {
    * 回答処理
    * ---------------------------------------------------------------- */
 
-  async handleGuess(ws: WebSocket, lat: number, lng: number, userId: string, playerName?: string) {
+  async handleGuess(ws: WebSocket, lat: number, lng: number, userId: string, playerName: string | null) {
     if (this.gameState.status !== "running" || !this.gameState.runnerPosition) return;
     if (this.gameState.moving) return;
     if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return;
@@ -351,11 +473,13 @@ export class GameRoom extends DurableObject<Env> {
       return;
     }
 
-    // --- 逃走モード ---
+    /* --- 逃走モード ---
+       見つけた人だけに点が入る。外した人も「最短距離」だけ記録しておく */
     this.gameState.attempts += 1;
     const correct = distanceKm <= CORRECT_RADIUS_KM;
 
     if (!correct) {
+      this.noteAttempt(userId, playerName, distanceKm);
       await this.persist();
       ws.send(
         JSON.stringify({
@@ -380,7 +504,8 @@ export class GameRoom extends DurableObject<Env> {
       proximityScore - this.gameState.hintPenalty - Math.max(0, this.gameState.attempts - 1) * RETRY_PENALTY
     );
 
-    this.gameState.totalScore += score;
+    this.awardScore(userId, playerName, score, distanceKm);
+    this.gameState.totalScore = this.roomTopScore();
     this.gameState.history = [
       ...this.gameState.history,
       { round: this.gameState.round, target, guess, distanceKm: roundTo(distanceKm, 2), score, caught: true },
@@ -398,7 +523,7 @@ export class GameRoom extends DurableObject<Env> {
         roundOver: true,
       })
     );
-    this.broadcast({ type: "caught", userId, playerName: playerName ?? null, round: this.gameState.round, score });
+    this.broadcast({ type: "caught", userId, playerName, round: this.gameState.round, score });
 
     this.recordGuess(userId, playerName, guess, distanceKm, score);
     await this.advanceChaseRound();
@@ -407,13 +532,13 @@ export class GameRoom extends DurableObject<Env> {
   /**
    * 通常モードの回答。
    *
-   * 以前は1人が答えた瞬間にラウンドが決着し、他の人は回答できなかった。
-   * いまは全員ぶん受け付け、接続中の全員が答えるか時間切れになるまで待つ。
+   * 点数は回答者ごとに独立して計算する（同じ地点でも、置いたピンが近い人ほど高い）。
+   * 全員が答えるか時間切れになるまでラウンドは終わらない。
    */
   private async handleClassicGuess(
     ws: WebSocket,
     userId: string,
-    playerName: string | undefined,
+    playerName: string | null,
     guess: LatLng,
     distanceKm: number
   ) {
@@ -421,7 +546,8 @@ export class GameRoom extends DurableObject<Env> {
     if (this.gameState.classicAnswers[userId]) return;
 
     const score = classicScore(distanceKm, regionScaleKm(this.gameState.region), this.gameState.hintPenalty);
-    this.gameState.classicAnswers[userId] = { guess, distanceKm, score };
+    this.gameState.classicAnswers[userId] = { name: playerName, guess, distanceKm, score };
+    this.ensurePlayer(userId, playerName);
     await this.persist();
 
     this.recordGuess(userId, playerName, guess, distanceKm, score);
@@ -452,31 +578,33 @@ export class GameRoom extends DurableObject<Env> {
 
   /**
    * 通常モード1ラウンドの決着。
-   * スコアは「いちばん近かった人」の点をルームの得点として加算する。
+   * 回答した全員に、それぞれの距離で計算した点を配る。
    */
   private async settleClassicRound(timeUp: boolean) {
     const target = this.gameState.runnerPosition!;
-    const answers = Object.values(this.gameState.classicAnswers);
+    const entries = Object.entries(this.gameState.classicAnswers);
 
-    let best: ClassicAnswer | null = null;
-    for (const a of answers) {
-      if (!best || a.distanceKm < best.distanceKm) best = a;
+    // 回答者それぞれに、その人の距離から出した点を加算する
+    for (const [id, ans] of entries) {
+      this.awardScore(id, ans.name, ans.score, ans.distanceKm);
     }
 
-    const score = best ? best.score : 0;
-    const distanceKm = best ? best.distanceKm : null;
-    const guess = best ? best.guess : null;
+    // 記録パネル用に「そのラウンドでいちばん近かった回答」を残す
+    let best: ClassicAnswer | null = null;
+    for (const [, ans] of entries) {
+      if (!best || ans.distanceKm < best.distanceKm) best = ans;
+    }
 
-    this.gameState.totalScore += score;
+    this.gameState.totalScore = this.roomTopScore();
     this.gameState.history = [
       ...this.gameState.history,
       {
         round: this.gameState.round,
         target,
-        guess,
-        distanceKm: distanceKm === null ? null : roundTo(distanceKm, 2),
-        score,
-        caught: distanceKm !== null && distanceKm <= CORRECT_RADIUS_KM,
+        guess: best ? best.guess : null,
+        distanceKm: best ? roundTo(best.distanceKm, 2) : null,
+        score: best ? best.score : 0,
+        caught: Boolean(best && best.distanceKm <= CORRECT_RADIUS_KM),
       },
     ];
     this.gameState.revealedTrail = [
@@ -491,10 +619,10 @@ export class GameRoom extends DurableObject<Env> {
 
     this.broadcast({
       type: "result",
-      distanceKm: distanceKm === null ? null : roundTo(distanceKm, 2),
-      correct: distanceKm !== null && distanceKm <= CORRECT_RADIUS_KM,
-      score,
-      proximity: distanceKm === null ? null : proximityBand(distanceKm),
+      distanceKm: best ? roundTo(best.distanceKm, 2) : null,
+      correct: Boolean(best && best.distanceKm <= CORRECT_RADIUS_KM),
+      score: best ? best.score : 0,
+      proximity: best ? proximityBand(best.distanceKm) : null,
       bearing: null,
       target,
       timeUp,
@@ -533,6 +661,8 @@ export class GameRoom extends DurableObject<Env> {
       maxRounds: rounds,
       round: 0,
       startedAt: Date.now(),
+      // 新しいゲームなので順位もリセットする
+      scoreboard: {},
     };
     await this.beginClassicRound();
   }
@@ -554,6 +684,8 @@ export class GameRoom extends DurableObject<Env> {
     const position = spot?.point ?? randomFallbackPoint(this.gameState.region);
     const hints = await buildPlaceHints(position, this.env.SESSIONS, regionHintLevel(this.gameState.region));
     const now = Date.now();
+
+    this.resetRoundScores();
 
     this.gameState = {
       ...this.gameState,
@@ -587,7 +719,7 @@ export class GameRoom extends DurableObject<Env> {
   async startChaseGame(region: RegionKey, intervalMs: number) {
     await this.ctx.storage.deleteAlarm();
 
-    this.gameState = { ...DEFAULT_STATE, mode: "chase", region, intervalMs, startedAt: Date.now() };
+    this.gameState = { ...DEFAULT_STATE, mode: "chase", region, intervalMs, startedAt: Date.now(), scoreboard: {} };
     this.announceMoving(true);
 
     const spot = await findStreetPointOnLand(this.env.MAPILLARY_TOKEN, region, this.env.SESSIONS);
@@ -613,6 +745,7 @@ export class GameRoom extends DurableObject<Env> {
       startedAt: now,
       moving: false,
       lastMoveAt: now,
+      scoreboard: {},
     };
 
     await this.persist();
@@ -702,6 +835,8 @@ export class GameRoom extends DurableObject<Env> {
     const position = moved?.point ?? previous;
     const hints = await buildPlaceHints(position, this.env.SESSIONS, regionHintLevel(this.gameState.region));
 
+    this.resetRoundScores();
+
     this.gameState.round += 1;
     this.gameState.runnerPosition = position;
     this.gameState.lastBearing = moved?.bearing ?? this.gameState.lastBearing;
@@ -731,7 +866,7 @@ export class GameRoom extends DurableObject<Env> {
   /** 待たずに投げる。失敗してもゲーム進行は止めない */
   private recordGuess(
     userId: string,
-    playerName: string | undefined,
+    playerName: string | null | undefined,
     guess: LatLng,
     distanceKm: number,
     score: number
@@ -760,7 +895,8 @@ export class GameRoom extends DurableObject<Env> {
   }
 
   private async saveFinalScore() {
-    if (this.gameState.totalScore <= 0) return;
+    const top = this.roomTopScore();
+    if (top <= 0) return;
     try {
       await this.env.DB.prepare(
         `INSERT INTO results (id, room_id, mode, region, rounds, total_score, finished_at)
@@ -772,7 +908,7 @@ export class GameRoom extends DurableObject<Env> {
           this.gameState.mode,
           this.gameState.region,
           this.gameState.maxRounds,
-          this.gameState.totalScore,
+          top,
           Date.now()
         )
         .run();
@@ -817,7 +953,7 @@ export class GameRoom extends DurableObject<Env> {
       hintsAvailable: Math.max(0, s.allHints.length - s.revealedHintCount),
       hintPenalty: s.hintPenalty,
       attempts: s.attempts,
-      totalScore: s.totalScore,
+      totalScore: this.roomTopScore(),
       intervalSeconds: Math.round(s.intervalMs / 1000),
       timeLimitSeconds: s.timeLimitSeconds,
       nextUpdateAt: s.mode === "chase" && s.status === "running" && !s.moving ? s.nextUpdateAt : 0,
@@ -826,6 +962,7 @@ export class GameRoom extends DurableObject<Env> {
       players: this.playerCount(exclude),
       hostId: this.hostId(exclude),
       answered: Object.keys(s.classicAnswers).length,
+      scoreboard: this.scoreboardList(exclude),
       moving: s.moving,
       lastMoveAt: s.lastMoveAt,
       revealedTrail: s.revealedTrail,

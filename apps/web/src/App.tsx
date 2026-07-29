@@ -6,7 +6,7 @@ import { API_URL, useGameRoom } from "./lib/useGameRoom";
 import { formatClock, formatDistance, formatScore, proximityMessage } from "./lib/format";
 import type { GuessResult, LatLng, Mode, StartOptions } from "./lib/types";
 
-type PanelKey = "settings" | "hints" | "history" | null;
+type PanelKey = "settings" | "hints" | "rank" | "history" | null;
 
 /** サーバーの /regions が返す1件 */
 interface RegionItem {
@@ -58,6 +58,7 @@ const EXPECTED_REGION_COUNT = 30;
 
 const SETTINGS_KEY = "geochase.settings.v1";
 const ROOM_KEY = "geochase.room.v1";
+const NAME_KEY = "geochase.name.v1";
 const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{4,64}$/;
 
 /** 正解したあと、答えのピンを何ミリ秒残すか。すぐ消すと「見えなかった」になる */
@@ -83,6 +84,19 @@ function resolveRoomId(): string {
   const created = crypto.randomUUID().slice(0, 8);
   localStorage.setItem(ROOM_KEY, created);
   return created;
+}
+
+/** 順位表に出す表示名。未設定なら「プレイヤー1234」を割り当てる */
+function resolvePlayerName(): string {
+  try {
+    const saved = localStorage.getItem(NAME_KEY);
+    if (saved) return saved;
+    const created = `プレイヤー${Math.floor(1000 + Math.random() * 9000)}`;
+    localStorage.setItem(NAME_KEY, created);
+    return created;
+  } catch {
+    return "プレイヤー";
+  }
 }
 
 /**
@@ -114,6 +128,7 @@ function loadSettings(): StartOptions {
 export default function App() {
   const isWide = useIsWide();
   const [roomId] = useState(resolveRoomId);
+  const [playerName, setPlayerName] = useState(resolvePlayerName);
   const [settings, setSettings] = useState<StartOptions>(loadSettings);
   const [panel, setPanel] = useState<PanelKey>(null);
   const [regions, setRegions] = useState<RegionItem[]>([]);
@@ -132,6 +147,7 @@ export default function App() {
 
   const lastRoundKey = useRef("");
   const lastMoveSeen = useRef(0);
+  const lastStatus = useRef<string>("");
   /** 表示中の結果をエフェクト内から読むためのミラー */
   const resultRef = useRef<GuessResult | null>(null);
   resultRef.current = result;
@@ -150,24 +166,30 @@ export default function App() {
   }, []);
 
   const handleCaught = useCallback(
-    (playerName: string | null, score: number) => {
-      showToast(`${playerName ?? "誰か"}が発見しました（+${formatScore(score)}）`);
+    (name: string | null, score: number) => {
+      showToast(`${name ?? "誰か"}が発見しました（+${formatScore(score)}）`);
     },
     [showToast]
   );
 
   const { state, connection, playerId, send, start, stop, serverNow } = useGameRoom({
     roomId,
+    playerName,
     onResult: handleResult,
     onCaught: handleCaught,
+    onNotice: showToast,
   });
 
-  /** 自分がホストか。ホストだけが設定変更と開始・停止をできる */
+  /** 自分がホストか。ホストだけが設定変更・開始・停止・次のラウンドをできる */
   const isHost = !state?.hostId || state.hostId === playerId;
 
   useEffect(() => {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   }, [settings]);
+
+  useEffect(() => {
+    if (playerName.trim()) localStorage.setItem(NAME_KEY, playerName.trim());
+  }, [playerName]);
 
   /* 捜索範囲の一覧を取得する。
      一覧はサーバーの REGION_DEFS が出どころなので、
@@ -231,6 +253,14 @@ export default function App() {
     }
   }, [state]);
 
+  /* ゲームが終わったら順位表を自動で開く */
+  useEffect(() => {
+    if (!state) return;
+    if (state.status === lastStatus.current) return;
+    lastStatus.current = state.status;
+    if (state.status === "finished") setPanel("rank");
+  }, [state?.status]);
+
   /* 逃走者が移動したら知らせる。地図の軌跡ピンもこのタイミングで1つ増える */
   useEffect(() => {
     if (!state?.lastMoveAt) return;
@@ -282,10 +312,10 @@ export default function App() {
 
   const submitGuess = useCallback(() => {
     if (!guessPin) return;
-    if (!send({ type: "guess", lat: guessPin.lat, lng: guessPin.lng })) {
+    if (!send({ type: "guess", lat: guessPin.lat, lng: guessPin.lng, playerName })) {
       showToast("接続が切れています。復帰を待っています");
     }
-  }, [guessPin, send, showToast]);
+  }, [guessPin, playerName, send, showToast]);
 
   const requestHint = useCallback(() => {
     if (!send({ type: "hint" })) showToast("接続が切れています");
@@ -320,8 +350,13 @@ export default function App() {
 
   const shareResult = useCallback(async () => {
     if (!state) return;
+    const me = state.scoreboard?.find((p) => p.id === playerId);
+    const rank = state.scoreboard?.findIndex((p) => p.id === playerId) ?? -1;
     const modeLabel = state.mode === "chase" ? "逃走モード" : "通常モード";
-    const text = `GeoChase で ${formatScore(state.totalScore)} 点（${modeLabel} / ${state.round}ラウンド）`;
+    const rankText = rank >= 0 && (state.scoreboard?.length ?? 0) > 1
+      ? `（${state.scoreboard!.length}人中 ${rank + 1}位）`
+      : "";
+    const text = `GeoChase で ${formatScore(me?.total ?? state.totalScore)} 点${rankText}｜${modeLabel} / ${state.round}ラウンド`;
     const url = `${window.location.origin}${window.location.pathname}`;
     try {
       if (navigator.share) await navigator.share({ title: "GeoChase", text, url });
@@ -332,7 +367,7 @@ export default function App() {
     } catch {
       /* ユーザーがキャンセルした */
     }
-  }, [state, showToast]);
+  }, [state, playerId, showToast]);
 
   const copyInvite = useCallback(async () => {
     const url = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
@@ -385,8 +420,15 @@ export default function App() {
   const isMoving = Boolean(state?.moving);
   const players = state?.players ?? 1;
   const answered = state?.answered ?? 0;
+  const scoreboard = state?.scoreboard ?? [];
   /** 通常モードで自分は答え済みだが、他の人を待っている */
   const waitingOthers = Boolean(result?.waiting);
+
+  /** 自分の成績と順位（1始まり。見つからなければ null） */
+  const myRank = useMemo(() => {
+    const i = scoreboard.findIndex((p) => p.id === playerId);
+    return i < 0 ? null : { rank: i + 1, ...scoreboard[i] };
+  }, [scoreboard, playerId]);
 
   const countdown = useMemo(() => {
     void tick;
@@ -440,11 +482,16 @@ export default function App() {
         */}
         <div className="topbar-meta">
           <span className={`link-dot link-${connection}`} aria-hidden="true" />
-          <span className="players-badge" title={isHost ? "あなたがホストです" : "ホストは別の人です"}>
+          <button
+            type="button"
+            className="players-badge"
+            onClick={() => setPanel(panel === "rank" ? null : "rank")}
+            title={isHost ? "あなたがホストです。タップで順位表" : "タップで順位表"}
+          >
             <span className="players-icon" aria-hidden="true">👥</span>
             <span className="players-count">{connection === "online" ? players : "—"}</span>
             {isHost && <span className="players-host">主</span>}
-          </span>
+          </button>
           <span className="link-label">
             {connection === "online" ? "接続中" : connection === "connecting" ? "接続しています" : "再接続しています"}
           </span>
@@ -479,20 +526,17 @@ export default function App() {
           </span>
         </div>
 
+        {/* 自分の累計スコアと順位。複数人なら「3位」も出す */}
         <div className="readout-cell">
           <span className="readout-label">
-            {state?.mode === "classic" && isRunning ? "回答済み" : "合計スコア"}
+            {state?.mode === "classic" && isRunning ? `回答 ${answered}/${players}人` : "あなたの得点"}
           </span>
           <span className={`readout-value${state && !isIdle ? "" : " is-empty"}`}>
             {state && !isIdle ? (
-              state.mode === "classic" && isRunning ? (
-                <>
-                  {answered}
-                  <span className="readout-sub">/{players}人</span>
-                </>
-              ) : (
-                formatScore(state.totalScore)
-              )
+              <>
+                {formatScore(myRank?.total ?? 0)}
+                {players > 1 && myRank && <span className="readout-sub">{myRank.rank}位</span>}
+              </>
             ) : (
               "—"
             )}
@@ -605,6 +649,18 @@ export default function App() {
           <div className="panel-body">
             {panel === "settings" && (
               <section className="panel">
+                <h2>プレイヤー</h2>
+                <label className="field">
+                  <span>表示名（順位表に出ます）</span>
+                  <input
+                    value={playerName}
+                    onChange={(e) => setPlayerName(e.target.value.slice(0, 20))}
+                    placeholder="例: たろう"
+                    maxLength={20}
+                    autoComplete="off"
+                  />
+                </label>
+
                 <h2>ゲーム設定</h2>
 
                 {!isHost && (
@@ -696,13 +752,13 @@ export default function App() {
                         ))}
                       </select>
                     </label>
-                    <p className="note">
-                      通常モードは全員が回答するか時間切れになるとラウンドが終わります。
-                      スコアはいちばん近かった人の点が入ります。
-                    </p>
                   </>
                 )}
 
+                <p className="note">
+                  点数はピンの距離から1人ずつ別々に計算されます。全員が回答するか時間切れでラウンドが終わり、
+                  最後に累計スコアの順位が出ます。
+                </p>
                 <p className="note">設定を変えたら上の「スタート」でやり直します。</p>
 
                 <h2>ルーム</h2>
@@ -737,10 +793,46 @@ export default function App() {
                 <button type="button" className="ghost-btn wide" onClick={newRoom}>
                   新しいルームを作る
                 </button>
-                <p className="note">同じルームに入った人と、同じ逃走者を一緒に追えます。</p>
+                <p className="note">同じルームに入った人と、同じ地点を一緒に当てられます。</p>
 
                 <h2>アプリ</h2>
                 <InstallButton />
+              </section>
+            )}
+
+            {panel === "rank" && (
+              <section className="panel">
+                <h2>{isFinished ? "最終順位" : "順位"}</h2>
+                {scoreboard.length > 0 ? (
+                  <ol className="rank-list">
+                    {scoreboard.map((p, i) => (
+                      <li key={p.id} className={p.id === playerId ? "is-me" : ""}>
+                        <span className={`rank-no rank-${i + 1 <= 3 ? i + 1 : "n"}`}>{i + 1}</span>
+                        <span className="rank-name">
+                          {p.name ?? "名無し"}
+                          {p.id === playerId && <span className="rank-you">あなた</span>}
+                          {!p.online && <span className="rank-offline">離席</span>}
+                        </span>
+                        <span className="rank-detail">
+                          {p.lastRound > 0 && <span className="rank-last">+{formatScore(p.lastRound)}</span>}
+                          {p.bestKm !== null && <span className="rank-best">最短 {formatDistance(p.bestKm)}</span>}
+                        </span>
+                        <span className="rank-total">{formatScore(p.total)}</span>
+                      </li>
+                    ))}
+                  </ol>
+                ) : (
+                  <p className="note">まだ誰も回答していません。</p>
+                )}
+
+                {isFinished && (
+                  <button type="button" className="ghost-btn wide" onClick={shareResult}>
+                    結果を共有
+                  </button>
+                )}
+                <p className="note">
+                  点数は同じ地点でも「置いたピンがどれだけ近いか」で1人ずつ別に計算されます。
+                </p>
               </section>
             )}
 
@@ -768,7 +860,7 @@ export default function App() {
                       {state && state.hintsAvailable > 0 ? "次のヒントを開く（−250点）" : "これ以上ヒントはありません"}
                     </button>
                     {state && state.hintPenalty > 0 && (
-                      <p className="note">このラウンドの減点: −{formatScore(state.hintPenalty)}</p>
+                      <p className="note">このラウンドの減点: −{formatScore(state.hintPenalty)}（全員に適用）</p>
                     )}
                   </>
                 )}
@@ -778,6 +870,7 @@ export default function App() {
             {panel === "history" && (
               <section className="panel">
                 <h2>ラウンド記録</h2>
+                <p className="note">そのラウンドで、いちばん近かった回答を載せています。</p>
                 {state && state.history.length > 0 ? (
                   <ul className="history-list">
                     {state.history.map((h) => (
@@ -791,11 +884,6 @@ export default function App() {
                 ) : (
                   <p className="note">まだ記録はありません。</p>
                 )}
-                {state && state.history.length > 0 && (
-                  <button type="button" className="ghost-btn wide" onClick={shareResult}>
-                    結果を共有
-                  </button>
-                )}
               </section>
             )}
           </div>
@@ -807,6 +895,13 @@ export default function App() {
               onClick={() => setPanel(panel === "settings" ? null : "settings")}
             >
               設定
+            </button>
+            <button
+              type="button"
+              className={panel === "rank" ? "is-active" : ""}
+              onClick={() => setPanel(panel === "rank" ? null : "rank")}
+            >
+              順位{players > 1 && myRank ? `・${myRank.rank}位` : ""}
             </button>
             <button
               type="button"
@@ -826,14 +921,24 @@ export default function App() {
 
           <footer className="actionbar">
             {isReveal ? (
-              <button type="button" className="primary-btn wide" onClick={nextRound} disabled={isMoving}>
-                {isMoving ? "次の地点を探しています…" : "次のラウンドへ"}
+              <button
+                type="button"
+                className="primary-btn wide"
+                onClick={nextRound}
+                disabled={isMoving || !isHost}
+                title={isHost ? undefined : "ホストだけが次のラウンドへ進められます"}
+              >
+                {isMoving
+                  ? "次の地点を探しています…"
+                  : isHost
+                  ? "次のラウンドへ"
+                  : "ホストが次に進めるのを待っています"}
               </button>
             ) : isFinished ? (
               <button type="button" className="primary-btn wide" onClick={handleStart} disabled={busy || !isHost}>
                 {isHost
-                  ? `もう一度あそぶ（合計 ${formatScore(state?.totalScore ?? 0)}点）`
-                  : `合計 ${formatScore(state?.totalScore ?? 0)}点（ホスト待ち）`}
+                  ? `もう一度あそぶ（あなた ${formatScore(myRank?.total ?? 0)}点）`
+                  : `あなた ${formatScore(myRank?.total ?? 0)}点（ホスト待ち）`}
               </button>
             ) : (
               <button

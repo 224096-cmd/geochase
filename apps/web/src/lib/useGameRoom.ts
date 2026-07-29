@@ -28,8 +28,11 @@ function resolvePlayerId(): string {
 
 interface Options {
   roomId: string;
+  /** 順位表に出す表示名 */
+  playerName: string;
   onResult: (result: GuessResult) => void;
   onCaught: (playerName: string | null, score: number) => void;
+  onNotice: (message: string) => void;
 }
 
 /**
@@ -39,7 +42,7 @@ interface Options {
  *  - サーバー時刻との差分を保持し、カウントダウンをローカル時計のズレなしで計算する
  *  - 接続時に playerId を渡し、サーバー側でホスト判定と個別の連打防止に使う
  */
-export function useGameRoom({ roomId, onResult, onCaught }: Options) {
+export function useGameRoom({ roomId, playerName, onResult, onCaught, onNotice }: Options) {
   const [state, setState] = useState<RoomState | null>(null);
   const [connection, setConnection] = useState<ConnectionStatus>("connecting");
   const [playerId] = useState(resolvePlayerId);
@@ -51,8 +54,12 @@ export function useGameRoom({ roomId, onResult, onCaught }: Options) {
   const heartbeat = useRef<number | null>(null);
   const closedByUs = useRef(false);
 
-  const handlers = useRef({ onResult, onCaught });
-  handlers.current = { onResult, onCaught };
+  const handlers = useRef({ onResult, onCaught, onNotice });
+  handlers.current = { onResult, onCaught, onNotice };
+
+  // 名前は接続を張り直さずに反映したいので、refで最新値を持つ
+  const nameRef = useRef(playerName);
+  nameRef.current = playerName;
 
   // connect と scheduleReconnect が相互に呼び合うため、refを挟んで循環参照を避ける
   const connectRef = useRef<() => void>(() => {});
@@ -69,7 +76,8 @@ export function useGameRoom({ roomId, onResult, onCaught }: Options) {
       setConnection("offline");
       return;
     }
-    const wsUrl = `${API_URL.replace(/^http/, "ws")}/room/${roomId}/ws?pid=${encodeURIComponent(playerId)}`;
+    const q = new URLSearchParams({ pid: playerId, name: nameRef.current });
+    const wsUrl = `${API_URL.replace(/^http/, "ws")}/room/${roomId}/ws?${q.toString()}`;
     setConnection((c) => (c === "online" ? c : "connecting"));
 
     let ws: WebSocket;
@@ -104,6 +112,8 @@ export function useGameRoom({ roomId, onResult, onCaught }: Options) {
         handlers.current.onResult(msg);
       } else if (msg.type === "caught") {
         handlers.current.onCaught(msg.playerName, msg.score);
+      } else if (msg.type === "notice") {
+        handlers.current.onNotice(msg.message);
       }
     };
 
@@ -155,6 +165,14 @@ export function useGameRoom({ roomId, onResult, onCaught }: Options) {
     ws.send(JSON.stringify(payload));
     return true;
   }, []);
+
+  /* 表示名が変わったらサーバーへ伝える。接続は張り直さない */
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      send({ type: "rename", playerName });
+    }, 400);
+    return () => window.clearTimeout(t);
+  }, [playerName, send]);
 
   /** サーバーからのエラー文をそのまま拾う（ホスト以外の操作など） */
   const readError = async (res: Response, fallback: string) => {

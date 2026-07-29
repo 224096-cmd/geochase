@@ -49,14 +49,34 @@ export interface StreetSpot {
   capturedAt?: number;
 }
 
-/** ラウンド終了後にクライアントへ公開する結果 */
+/** ラウンド終了後にクライアントへ公開する結果（ルーム全体の記録） */
 export interface RoundRecord {
   round: number;
   target: LatLng;
+  /** そのラウンドでいちばん近かった回答 */
   guess: LatLng | null;
   distanceKm: number | null;
   score: number;
   caught: boolean;
+}
+
+/**
+ * プレイヤー1人ぶんの成績。
+ * 距離からのスコアは回答者ごとに独立して計算し、ここに積み上げる。
+ */
+export interface PlayerScore {
+  id: string;
+  name: string | null;
+  /** 累計スコア。順位はこれで決まる */
+  total: number;
+  /** 直近ラウンドで入った点 */
+  lastRound: number;
+  /** 回答したラウンド数 */
+  answered: number;
+  /** これまでで最も近づけた距離(km) */
+  bestKm: number | null;
+  /** いま接続しているか */
+  online: boolean;
 }
 
 /** サーバーがクライアントへ送る状態。正解座標(runnerPosition)はラウンド終了まで含めない */
@@ -74,6 +94,7 @@ export interface PublicState {
   hintsAvailable: number;
   hintPenalty: number;
   attempts: number;
+  /** ルームの代表スコア（最高得点者の累計）。ランキングは scoreboard を見る */
   totalScore: number;
   intervalSeconds: number;
   timeLimitSeconds: number;
@@ -82,10 +103,12 @@ export interface PublicState {
   roundEndsAt: number;
   serverNow: number;
   players: number;
-  /** いちばん先に入室した人のID。設定変更と開始・停止はこの人だけができる */
+  /** いちばん先に入室した人のID。設定変更・開始・停止・次のラウンドはこの人だけ */
   hostId: string | null;
   /** 通常モードで、このラウンドに回答済みのプレイヤー数 */
   answered: number;
+  /** 累計スコア順に並べたプレイヤー一覧 */
+  scoreboard: PlayerScore[];
   /** 次の地点をMapillaryから探している最中 */
   moving: boolean;
   /** 直近で逃走者が移動した時刻(epoch ms) */
@@ -99,6 +122,7 @@ export type ClientMessage =
   | { type: "guess"; lat: number; lng: number; userId?: string; playerName?: string }
   | { type: "hint" }
   | { type: "next" }
+  | { type: "rename"; playerName: string }
   | { type: "sync" };
 
 export interface GuessResultMessage {
@@ -114,4 +138,10 @@ export interface GuessResultMessage {
   roundOver: boolean;
   /** 通常モードで自分の回答は受理されたが、他の人を待っている状態 */
   waiting?: boolean;
+}
+
+/** 操作が拒否されたときなど、1人にだけ伝えたい短いお知らせ */
+export interface NoticeMessage {
+  type: "notice";
+  message: string;
 }
