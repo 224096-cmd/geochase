@@ -12,35 +12,56 @@ import { registerPwa } from "./lib/registerPwa";
  * CSSで高さを固定で予約すると、広告が小さい／配信されないときに
  * その差分が黒い空白として残る。ここで実寸に合わせる。
  *
- * PC枠については「枠が見えているのに中身が空」なのか
- * 「枠ごと消えている」のかを切り分けられるよう、
- * 配信の有無を data 属性に出しておく（DevToolsで確認できる）。
+ * frameSelector … 畳む対象の外枠
+ * slotSelector  … 広告スクリプトが中身を差し込む内側の箱（必ず外枠と別要素にする）
+ * cssVar        … 実測した高さを入れるCSS変数（不要なら省略）
+ *
+ * 注意:
+ *   外枠と内側に同じ要素を指定してはいけない。
+ *   apply() は外枠の class と data 属性を書き換えるので、
+ *   その要素自身を attributes 付きで監視すると無限ループになる。
+ *   （実際にこれで画面が固まる不具合を出した）
  */
-function trackAdSlot(barSelector: string, slotSelector: string) {
-  const bar = document.querySelector<HTMLElement>(barSelector);
-  if (!bar) return;
-  const slot = bar.querySelector<HTMLElement>(slotSelector) ?? bar;
+function trackAdSlot(frameSelector: string, slotSelector: string, cssVar?: string) {
+  const frame = document.querySelector<HTMLElement>(frameSelector);
+  const slot = document.querySelector<HTMLElement>(slotSelector);
+  if (!frame || !slot || frame === slot) return;
+
+  let scheduled = false;
 
   const apply = () => {
-    // 畳んだ状態のままだと中身を測れないので、いったん元に戻してから測る
-    bar.classList.remove("is-empty");
-    const contentHeight = Math.max(slot.scrollHeight, Math.round(slot.getBoundingClientRect().height));
-    const filled = contentHeight >= 8;
-    bar.classList.toggle("is-empty", !filled);
-    bar.dataset.adFilled = filled ? "yes" : "no";
-    bar.dataset.adHeight = String(contentHeight);
+    // 1フレームに1回だけ動かす。連続した変更で何度も走らせない
+    if (scheduled) return;
+    scheduled = true;
 
-    if (barSelector === ".ad-bar") {
-      const barHeight = filled ? Math.round(bar.getBoundingClientRect().height) : 0;
-      document.documentElement.style.setProperty("--ad-h", `${barHeight}px`);
-    }
+    requestAnimationFrame(() => {
+      scheduled = false;
+
+      // 測るのは内側の箱。外枠を畳んでも内側の高さは変わらないので、
+      // 「いったんclassを外して測る」といった小細工が要らない
+      const contentHeight = Math.max(slot.scrollHeight, Math.round(slot.getBoundingClientRect().height));
+      const filled = contentHeight >= 8; // 8px未満は「配信なし」とみなす
+
+      // 値が変わったときだけ書く。毎回書くと監視が再発火する
+      if (frame.classList.contains("is-empty") === filled) {
+        frame.classList.toggle("is-empty", !filled);
+      }
+      const flag = filled ? "yes" : "no";
+      if (frame.dataset.adFilled !== flag) frame.dataset.adFilled = flag;
+
+      if (cssVar) {
+        const px = filled ? Math.round(frame.getBoundingClientRect().height) : 0;
+        document.documentElement.style.setProperty(cssVar, `${px}px`);
+      }
+    });
   };
 
   apply();
 
-  // 広告は遅れて差し込まれるので、DOMとサイズの両方を監視する
+  // 広告は遅れて差し込まれるので、中身の増減とサイズ変化を監視する。
+  // attributes は監視しない（自分で付け外しするクラスで再発火するため）
   if ("ResizeObserver" in window) new ResizeObserver(apply).observe(slot);
-  new MutationObserver(apply).observe(slot, { childList: true, subtree: true, attributes: true });
+  new MutationObserver(apply).observe(slot, { childList: true, subtree: true });
 
   // 監視で拾えない環境向けの保険
   [300, 1000, 2500, 5000, 9000].forEach((ms) => window.setTimeout(apply, ms));
@@ -49,10 +70,10 @@ function trackAdSlot(barSelector: string, slotSelector: string) {
 }
 
 function trackAds() {
-  // スマホ用の下部バー
-  trackAdSlot(".ad-bar", "#ad-sp");
+  // スマホ用の下部バー。高さを --ad-h に流してトーストの位置に使う
+  trackAdSlot(".ad-bar", "#ad-sp", "--ad-h");
   // PC用の右下レクタングル。中身が入らなければ枠ごと畳む
-  trackAdSlot("#ad-pc-rect", "#ad-pc-rect");
+  trackAdSlot("#ad-pc-rect", "#ad-pc-slot");
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

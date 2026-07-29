@@ -45,8 +45,9 @@
       ・スマホ(320x50相当) → 画面下のバー
       ・PC レクタングル(300x250) → 右下に固定
 
-      高さは CSS で予約しない。main.tsx の trackAdBar() が実寸を測って
-      --ad-h に入れ、配信が無ければ .is-empty を付けて枠ごと畳む。
+      外枠と、広告が差し込まれる内側の箱は必ず分ける。
+      main.tsx が「内側を測って、外枠を畳む」構造になっており、
+      同じ要素だと監視が自分自身の書き換えで再発火して固まるため。
     -->
     <div class="ad-bar is-empty">
       <div id="ad-sp">
@@ -56,14 +57,12 @@
       </div>
     </div>
 
-    <!--
-      PC用。以前は z-index が Leaflet のコントロール(800)より低くて
-      地図の後ろに隠れていたので、CSS側で 1500 まで引き上げてある。
-    -->
     <div id="ad-pc-rect">
-      <!-- admax -->
-      <script src="https://adm.shinobi.jp/s/f04ab2d2138d77559ded8cc7a03e2e3a"></script>
-      <!-- admax -->
+      <div id="ad-pc-slot">
+        <!-- admax -->
+        <script src="https://adm.shinobi.jp/s/f04ab2d2138d77559ded8cc7a03e2e3a"></script>
+        <!-- admax -->
+      </div>
     </div>
 
     <script type="module" src="/src/main.tsx"></script>
