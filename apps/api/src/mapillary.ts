@@ -17,9 +17,6 @@ const MIN_SEQUENCE_LENGTH = 8;
 
 /* ------------------------------------------------------------------ *
  * 画質の条件
- *
- * 「鮮明な写真を探す」ボタンを廃止したぶん、最初から高解像度だけを
- * 引くように基準を1段引き上げてある。
  * ------------------------------------------------------------------ */
 
 interface QualityTier {
@@ -48,22 +45,28 @@ const YEAR_MS = 365.25 * 24 * 60 * 60 * 1000;
 type Bbox = [number, number, number, number];
 
 /**
- * hintLevel = 最初に出すヒントの粒度。
+ * hintLevel = 最初に出すヒントの粒度。選んだ時点で分かっていることは出さない。
  *   0 … 国から出す（世界）
- *   1 … 都道府県・州から出す（国や地方を指定済み＝国は自明）
+ *   1 … 都道府県・州から出す（日本全国・地方・国指定）
  *   2 … 市区町村から出す（都道府県を指定済み）
+ *   3 … 緯度経度から出す（市区町村を指定済み）
  */
+type HintLevel = 0 | 1 | 2 | 3;
+
 interface RegionDef {
   label: string;
   group: string;
   bboxes: Bbox[];
   scaleKm: number;
-  hintLevel: 0 | 1 | 2;
+  hintLevel: HintLevel;
 }
 
 /**
- * 島が散らばる地域は bbox を分割してある。
- * 1つの大きな四角にすると海ばかり引いて、地点探索が何度も空振りするため。
+ * 島や山が多い地域は bbox を分割してある。
+ * 1つの大きな四角にすると海や山ばかり引いて、地点探索が何度も空振りするため。
+ *
+ * 市区町村は「Mapillaryの画像が実際にある都市」だけを載せている。
+ * 画像が数枚しか無い町を選べても、探索が空振りして遊べないため。
  */
 export const REGION_DEFS: Record<string, RegionDef> = {
   /* ---------- まとめ ---------- */
@@ -98,139 +101,209 @@ export const REGION_DEFS: Record<string, RegionDef> = {
     bboxes: [[130.3, 33.5, 130.6, 33.7], [130.6, 32.7, 131.0, 33.0], [130.4, 31.5, 130.7, 31.7], [131.4, 31.85, 131.6, 32.0], [127.6, 26.15, 128.0, 26.5]] },
 
   /* ---------- 都道府県（hintLevel:2 = 市区町村から出す） ---------- */
-  hokkaido: { label: "北海道", group: "北海道・東北", scaleKm: 500, hintLevel: 2,
+  hokkaido: { label: "北海道", group: "都道府県｜北海道・東北", scaleKm: 500, hintLevel: 2,
     bboxes: [[140.9, 42.85, 141.7, 43.35], [140.0, 41.7, 141.0, 42.4], [141.2, 43.6, 142.0, 44.5], [143.9, 42.9, 144.6, 43.3], [144.2, 43.7, 144.5, 44.0]] },
-  aomori: { label: "青森県", group: "北海道・東北", scaleKm: 120, hintLevel: 2,
+  aomori: { label: "青森県", group: "都道府県｜北海道・東北", scaleKm: 120, hintLevel: 2,
     bboxes: [[140.6, 40.7, 140.95, 40.95], [141.3, 40.45, 141.65, 40.7], [140.4, 40.5, 140.7, 40.7]] },
-  iwate: { label: "岩手県", group: "北海道・東北", scaleKm: 150, hintLevel: 2,
+  iwate: { label: "岩手県", group: "都道府県｜北海道・東北", scaleKm: 150, hintLevel: 2,
     bboxes: [[141.0, 39.6, 141.3, 39.85], [141.6, 39.55, 142.0, 39.8], [141.0, 39.0, 141.3, 39.3]] },
-  miyagi: { label: "宮城県", group: "北海道・東北", scaleKm: 110, hintLevel: 2,
+  miyagi: { label: "宮城県", group: "都道府県｜北海道・東北", scaleKm: 110, hintLevel: 2,
     bboxes: [[140.75, 38.2, 141.15, 38.4], [141.2, 38.35, 141.5, 38.6], [140.85, 38.0, 141.2, 38.2]] },
-  akita: { label: "秋田県", group: "北海道・東北", scaleKm: 130, hintLevel: 2,
+  akita: { label: "秋田県", group: "都道府県｜北海道・東北", scaleKm: 130, hintLevel: 2,
     bboxes: [[140.0, 39.6, 140.35, 39.85], [140.4, 39.3, 140.7, 39.55], [140.05, 40.15, 140.4, 40.35]] },
-  yamagata: { label: "山形県", group: "北海道・東北", scaleKm: 110, hintLevel: 2,
+  yamagata: { label: "山形県", group: "都道府県｜北海道・東北", scaleKm: 110, hintLevel: 2,
     bboxes: [[140.2, 38.2, 140.5, 38.4], [139.8, 38.7, 140.0, 38.9], [140.0, 37.85, 140.3, 38.05]] },
-  fukushima: { label: "福島県", group: "北海道・東北", scaleKm: 130, hintLevel: 2,
+  fukushima: { label: "福島県", group: "都道府県｜北海道・東北", scaleKm: 130, hintLevel: 2,
     bboxes: [[140.35, 37.7, 140.6, 37.85], [139.9, 37.45, 140.15, 37.6], [140.85, 37.0, 141.05, 37.2]] },
 
-  ibaraki: { label: "茨城県", group: "関東", scaleKm: 90, hintLevel: 2,
+  ibaraki: { label: "茨城県", group: "都道府県｜関東", scaleKm: 90, hintLevel: 2,
     bboxes: [[140.3, 36.3, 140.6, 36.45], [140.05, 36.05, 140.3, 36.2], [140.4, 36.55, 140.7, 36.75]] },
-  tochigi: { label: "栃木県", group: "関東", scaleKm: 90, hintLevel: 2,
+  tochigi: { label: "栃木県", group: "都道府県｜関東", scaleKm: 90, hintLevel: 2,
     bboxes: [[139.8, 36.5, 140.1, 36.7], [139.6, 36.3, 139.9, 36.45], [139.6, 36.7, 139.85, 36.85]] },
-  gunma: { label: "群馬県", group: "関東", scaleKm: 90, hintLevel: 2,
+  gunma: { label: "群馬県", group: "都道府県｜関東", scaleKm: 90, hintLevel: 2,
     bboxes: [[139.0, 36.3, 139.3, 36.45], [139.2, 36.15, 139.5, 36.3], [138.85, 36.5, 139.1, 36.7]] },
-  saitama: { label: "埼玉県", group: "関東", scaleKm: 70, hintLevel: 2,
+  saitama: { label: "埼玉県", group: "都道府県｜関東", scaleKm: 70, hintLevel: 2,
     bboxes: [[139.55, 35.83, 139.75, 35.95], [139.35, 35.85, 139.6, 36.0], [139.05, 35.95, 139.35, 36.12]] },
-  chiba: { label: "千葉県", group: "関東", scaleKm: 90, hintLevel: 2,
+  chiba: { label: "千葉県", group: "都道府県｜関東", scaleKm: 90, hintLevel: 2,
     bboxes: [[139.95, 35.55, 140.2, 35.72], [140.05, 35.65, 140.35, 35.85], [139.85, 35.3, 140.1, 35.5]] },
-  tokyo: { label: "東京都", group: "関東", scaleKm: 45, hintLevel: 2,
+  tokyo: { label: "東京都", group: "都道府県｜関東", scaleKm: 45, hintLevel: 2,
     bboxes: [[139.65, 35.63, 139.82, 35.75], [139.5, 35.65, 139.68, 35.76], [139.28, 35.68, 139.5, 35.78]] },
-  kanagawa: { label: "神奈川県", group: "関東", scaleKm: 70, hintLevel: 2,
+  kanagawa: { label: "神奈川県", group: "都道府県｜関東", scaleKm: 70, hintLevel: 2,
     bboxes: [[139.55, 35.42, 139.75, 35.56], [139.6, 35.24, 139.75, 35.37], [139.3, 35.3, 139.55, 35.45]] },
 
-  niigata: { label: "新潟県", group: "中部", scaleKm: 140, hintLevel: 2,
+  niigata: { label: "新潟県", group: "都道府県｜中部", scaleKm: 140, hintLevel: 2,
     bboxes: [[138.95, 37.85, 139.2, 38.0], [138.2, 37.4, 138.5, 37.6], [139.0, 37.5, 139.3, 37.7]] },
-  toyama: { label: "富山県", group: "中部", scaleKm: 70, hintLevel: 2,
+  toyama: { label: "富山県", group: "都道府県｜中部", scaleKm: 70, hintLevel: 2,
     bboxes: [[137.15, 36.65, 137.35, 36.78], [136.95, 36.7, 137.15, 36.85], [137.2, 36.45, 137.45, 36.6]] },
-  ishikawa: { label: "石川県", group: "中部", scaleKm: 90, hintLevel: 2,
+  ishikawa: { label: "石川県", group: "都道府県｜中部", scaleKm: 90, hintLevel: 2,
     bboxes: [[136.6, 36.5, 136.8, 36.65], [136.8, 36.75, 137.05, 36.95], [136.9, 37.2, 137.15, 37.4]] },
-  fukui: { label: "福井県", group: "中部", scaleKm: 80, hintLevel: 2,
+  fukui: { label: "福井県", group: "都道府県｜中部", scaleKm: 80, hintLevel: 2,
     bboxes: [[136.15, 36.0, 136.35, 36.15], [136.0, 35.6, 136.2, 35.75], [135.7, 35.45, 135.95, 35.6]] },
-  yamanashi: { label: "山梨県", group: "中部", scaleKm: 70, hintLevel: 2,
+  yamanashi: { label: "山梨県", group: "都道府県｜中部", scaleKm: 70, hintLevel: 2,
     bboxes: [[138.5, 35.62, 138.75, 35.75], [138.4, 35.5, 138.6, 35.65], [138.7, 35.45, 138.9, 35.6]] },
-  nagano: { label: "長野県", group: "中部", scaleKm: 130, hintLevel: 2,
+  nagano: { label: "長野県", group: "都道府県｜中部", scaleKm: 130, hintLevel: 2,
     bboxes: [[138.15, 36.6, 138.35, 36.75], [137.9, 36.15, 138.15, 36.3], [138.15, 35.95, 138.4, 36.1]] },
-  gifu: { label: "岐阜県", group: "中部", scaleKm: 100, hintLevel: 2,
+  gifu: { label: "岐阜県", group: "都道府県｜中部", scaleKm: 100, hintLevel: 2,
     bboxes: [[136.7, 35.35, 136.95, 35.5], [136.5, 35.4, 136.75, 35.55], [137.15, 36.1, 137.35, 36.25]] },
-  shizuoka: { label: "静岡県", group: "中部", scaleKm: 110, hintLevel: 2,
+  shizuoka: { label: "静岡県", group: "都道府県｜中部", scaleKm: 110, hintLevel: 2,
     bboxes: [[138.3, 34.95, 138.5, 35.05], [137.65, 34.65, 137.85, 34.8], [138.9, 35.05, 139.1, 35.2]] },
-  aichi: { label: "愛知県", group: "中部", scaleKm: 80, hintLevel: 2,
+  aichi: { label: "愛知県", group: "都道府県｜中部", scaleKm: 80, hintLevel: 2,
     bboxes: [[136.85, 35.1, 137.05, 35.25], [137.1, 34.95, 137.3, 35.1], [137.35, 34.7, 137.55, 34.82]] },
 
-  mie: { label: "三重県", group: "近畿", scaleKm: 100, hintLevel: 2,
+  mie: { label: "三重県", group: "都道府県｜近畿", scaleKm: 100, hintLevel: 2,
     bboxes: [[136.45, 34.65, 136.65, 34.8], [136.4, 34.45, 136.6, 34.6], [136.7, 34.45, 136.9, 34.6]] },
-  shiga: { label: "滋賀県", group: "近畿", scaleKm: 60, hintLevel: 2,
+  shiga: { label: "滋賀県", group: "都道府県｜近畿", scaleKm: 60, hintLevel: 2,
     bboxes: [[135.85, 35.0, 136.05, 35.15], [136.2, 35.25, 136.4, 35.4], [135.95, 34.95, 136.15, 35.05]] },
-  kyoto: { label: "京都府", group: "近畿", scaleKm: 70, hintLevel: 2,
+  kyoto: { label: "京都府", group: "都道府県｜近畿", scaleKm: 70, hintLevel: 2,
     bboxes: [[135.72, 34.98, 135.82, 35.06], [135.6, 34.85, 135.78, 34.98], [135.2, 35.45, 135.4, 35.58]] },
-  osaka: { label: "大阪府", group: "近畿", scaleKm: 45, hintLevel: 2,
+  osaka: { label: "大阪府", group: "都道府県｜近畿", scaleKm: 45, hintLevel: 2,
     bboxes: [[135.47, 34.65, 135.58, 34.73], [135.5, 34.55, 135.65, 34.66], [135.55, 34.75, 135.72, 34.85]] },
-  hyogo: { label: "兵庫県", group: "近畿", scaleKm: 100, hintLevel: 2,
+  hyogo: { label: "兵庫県", group: "都道府県｜近畿", scaleKm: 100, hintLevel: 2,
     bboxes: [[135.15, 34.66, 135.3, 34.75], [134.65, 34.78, 134.9, 34.9], [134.9, 34.65, 135.1, 34.78]] },
-  nara: { label: "奈良県", group: "近畿", scaleKm: 60, hintLevel: 2,
+  nara: { label: "奈良県", group: "都道府県｜近畿", scaleKm: 60, hintLevel: 2,
     bboxes: [[135.75, 34.65, 135.9, 34.75], [135.75, 34.45, 135.9, 34.58], [135.85, 34.28, 136.0, 34.4]] },
-  wakayama: { label: "和歌山県", group: "近畿", scaleKm: 80, hintLevel: 2,
+  wakayama: { label: "和歌山県", group: "都道府県｜近畿", scaleKm: 80, hintLevel: 2,
     bboxes: [[135.15, 34.2, 135.3, 34.32], [135.3, 33.9, 135.5, 34.05], [135.7, 33.65, 135.9, 33.8]] },
 
-  tottori: { label: "鳥取県", group: "中国・四国", scaleKm: 70, hintLevel: 2,
+  tottori: { label: "鳥取県", group: "都道府県｜中国・四国", scaleKm: 70, hintLevel: 2,
     bboxes: [[134.15, 35.45, 134.35, 35.55], [133.3, 35.4, 133.5, 35.5], [133.95, 35.4, 134.15, 35.5]] },
-  shimane: { label: "島根県", group: "中国・四国", scaleKm: 90, hintLevel: 2,
+  shimane: { label: "島根県", group: "都道府県｜中国・四国", scaleKm: 90, hintLevel: 2,
     bboxes: [[133.0, 35.42, 133.2, 35.53], [132.65, 35.15, 132.85, 35.3], [132.05, 34.85, 132.25, 35.0]] },
-  okayama: { label: "岡山県", group: "中国・四国", scaleKm: 80, hintLevel: 2,
+  okayama: { label: "岡山県", group: "都道府県｜中国・四国", scaleKm: 80, hintLevel: 2,
     bboxes: [[133.85, 34.6, 134.0, 34.72], [133.7, 34.55, 133.85, 34.65], [133.35, 34.45, 133.55, 34.6]] },
-  hiroshima: { label: "広島県", group: "中国・四国", scaleKm: 80, hintLevel: 2,
+  hiroshima: { label: "広島県", group: "都道府県｜中国・四国", scaleKm: 80, hintLevel: 2,
     bboxes: [[132.4, 34.36, 132.55, 34.48], [133.3, 34.45, 133.5, 34.58], [132.55, 34.22, 132.75, 34.35]] },
-  yamaguchi: { label: "山口県", group: "中国・四国", scaleKm: 80, hintLevel: 2,
+  yamaguchi: { label: "山口県", group: "都道府県｜中国・四国", scaleKm: 80, hintLevel: 2,
     bboxes: [[131.4, 33.92, 131.6, 34.05], [131.4, 34.15, 131.6, 34.28], [130.9, 33.95, 131.1, 34.08]] },
-  tokushima: { label: "徳島県", group: "中国・四国", scaleKm: 60, hintLevel: 2,
+  tokushima: { label: "徳島県", group: "都道府県｜中国・四国", scaleKm: 60, hintLevel: 2,
     bboxes: [[134.5, 34.03, 134.65, 34.13], [134.3, 33.9, 134.5, 34.05], [134.15, 33.85, 134.35, 34.0]] },
-  kagawa: { label: "香川県", group: "中国・四国", scaleKm: 45, hintLevel: 2,
+  kagawa: { label: "香川県", group: "都道府県｜中国・四国", scaleKm: 45, hintLevel: 2,
     bboxes: [[134.0, 34.3, 134.15, 34.4], [133.75, 34.25, 133.95, 34.38], [134.15, 34.15, 134.35, 34.28]] },
-  ehime: { label: "愛媛県", group: "中国・四国", scaleKm: 80, hintLevel: 2,
+  ehime: { label: "愛媛県", group: "都道府県｜中国・四国", scaleKm: 80, hintLevel: 2,
     bboxes: [[132.7, 33.8, 132.85, 33.9], [132.95, 33.9, 133.15, 34.05], [132.5, 33.2, 132.7, 33.35]] },
-  kochi: { label: "高知県", group: "中国・四国", scaleKm: 90, hintLevel: 2,
+  kochi: { label: "高知県", group: "都道府県｜中国・四国", scaleKm: 90, hintLevel: 2,
     bboxes: [[133.45, 33.52, 133.65, 33.62], [133.6, 33.6, 133.8, 33.72], [132.9, 32.95, 133.1, 33.1]] },
 
-  fukuoka: { label: "福岡県", group: "九州・沖縄", scaleKm: 80, hintLevel: 2,
+  fukuoka: { label: "福岡県", group: "都道府県｜九州・沖縄", scaleKm: 80, hintLevel: 2,
     bboxes: [[130.35, 33.55, 130.5, 33.65], [130.8, 33.85, 131.0, 33.95], [130.4, 33.3, 130.6, 33.42]] },
-  saga: { label: "佐賀県", group: "九州・沖縄", scaleKm: 55, hintLevel: 2,
+  saga: { label: "佐賀県", group: "都道府県｜九州・沖縄", scaleKm: 55, hintLevel: 2,
     bboxes: [[130.25, 33.23, 130.4, 33.35], [129.95, 33.42, 130.15, 33.55], [130.05, 33.15, 130.25, 33.28]] },
-  nagasaki: { label: "長崎県", group: "九州・沖縄", scaleKm: 90, hintLevel: 2,
+  nagasaki: { label: "長崎県", group: "都道府県｜九州・沖縄", scaleKm: 90, hintLevel: 2,
     bboxes: [[129.83, 32.72, 129.95, 32.82], [129.65, 33.13, 129.8, 33.25], [129.25, 34.15, 129.45, 34.35]] },
-  kumamoto: { label: "熊本県", group: "九州・沖縄", scaleKm: 80, hintLevel: 2,
+  kumamoto: { label: "熊本県", group: "都道府県｜九州・沖縄", scaleKm: 80, hintLevel: 2,
     bboxes: [[130.65, 32.75, 130.8, 32.85], [130.55, 32.45, 130.75, 32.58], [131.0, 32.85, 131.2, 32.98]] },
-  oita: { label: "大分県", group: "九州・沖縄", scaleKm: 70, hintLevel: 2,
+  oita: { label: "大分県", group: "都道府県｜九州・沖縄", scaleKm: 70, hintLevel: 2,
     bboxes: [[131.55, 33.18, 131.75, 33.3], [131.45, 33.25, 131.6, 33.38], [131.3, 33.05, 131.5, 33.18]] },
-  miyazaki: { label: "宮崎県", group: "九州・沖縄", scaleKm: 80, hintLevel: 2,
+  miyazaki: { label: "宮崎県", group: "都道府県｜九州・沖縄", scaleKm: 80, hintLevel: 2,
     bboxes: [[131.35, 31.85, 131.5, 31.98], [131.6, 32.4, 131.75, 32.55], [131.05, 32.05, 131.25, 32.2]] },
-  kagoshima: { label: "鹿児島県", group: "九州・沖縄", scaleKm: 110, hintLevel: 2,
+  kagoshima: { label: "鹿児島県", group: "都道府県｜九州・沖縄", scaleKm: 110, hintLevel: 2,
     bboxes: [[130.5, 31.55, 130.65, 31.65], [130.3, 31.35, 130.5, 31.5], [129.45, 28.3, 129.65, 28.45]] },
-  okinawa: { label: "沖縄県", group: "九州・沖縄", scaleKm: 80, hintLevel: 2,
+  okinawa: { label: "沖縄県", group: "都道府県｜九州・沖縄", scaleKm: 80, hintLevel: 2,
     bboxes: [[127.65, 26.18, 127.85, 26.35], [127.85, 26.4, 128.1, 26.6], [125.25, 24.75, 125.42, 24.88]] },
 
+  /* ---------- 市区町村（hintLevel:3 = 緯度経度から出す） ---------- */
+  m_sapporo: { label: "札幌市", group: "市区町村｜東日本", scaleKm: 18, hintLevel: 3, bboxes: [[141.31, 43.04, 141.39, 43.09]] },
+  m_hakodate: { label: "函館市", group: "市区町村｜東日本", scaleKm: 12, hintLevel: 3, bboxes: [[140.71, 41.76, 140.78, 41.8]] },
+  m_asahikawa: { label: "旭川市", group: "市区町村｜東日本", scaleKm: 12, hintLevel: 3, bboxes: [[142.34, 43.75, 142.4, 43.79]] },
+  m_aomori: { label: "青森市", group: "市区町村｜東日本", scaleKm: 10, hintLevel: 3, bboxes: [[140.71, 40.8, 140.78, 40.84]] },
+  m_morioka: { label: "盛岡市", group: "市区町村｜東日本", scaleKm: 10, hintLevel: 3, bboxes: [[141.12, 39.68, 141.19, 39.72]] },
+  m_sendai: { label: "仙台市", group: "市区町村｜東日本", scaleKm: 14, hintLevel: 3, bboxes: [[140.84, 38.23, 140.93, 38.29]] },
+  m_akita: { label: "秋田市", group: "市区町村｜東日本", scaleKm: 10, hintLevel: 3, bboxes: [[140.08, 39.7, 140.15, 39.74]] },
+  m_yamagata: { label: "山形市", group: "市区町村｜東日本", scaleKm: 10, hintLevel: 3, bboxes: [[140.31, 38.23, 140.37, 38.27]] },
+  m_koriyama: { label: "郡山市・福島市", group: "市区町村｜東日本", scaleKm: 14, hintLevel: 3, bboxes: [[140.35, 37.38, 140.42, 37.42], [140.44, 37.74, 140.5, 37.78]] },
+  m_mito: { label: "水戸市", group: "市区町村｜東日本", scaleKm: 10, hintLevel: 3, bboxes: [[140.43, 36.35, 140.5, 36.39]] },
+  m_utsunomiya: { label: "宇都宮市", group: "市区町村｜東日本", scaleKm: 10, hintLevel: 3, bboxes: [[139.86, 36.53, 139.93, 36.58]] },
+  m_nikko: { label: "日光市", group: "市区町村｜東日本", scaleKm: 12, hintLevel: 3, bboxes: [[139.57, 36.72, 139.65, 36.78]] },
+  m_maebashi: { label: "前橋市・高崎市", group: "市区町村｜東日本", scaleKm: 14, hintLevel: 3, bboxes: [[139.05, 36.37, 139.09, 36.41], [138.99, 36.31, 139.03, 36.35]] },
+  m_saitama: { label: "さいたま市", group: "市区町村｜東日本", scaleKm: 14, hintLevel: 3, bboxes: [[139.6, 35.85, 139.68, 35.92]] },
+  m_chiba: { label: "千葉市", group: "市区町村｜東日本", scaleKm: 12, hintLevel: 3, bboxes: [[140.08, 35.58, 140.16, 35.63]] },
+  m_tokyo23: { label: "東京23区", group: "市区町村｜東日本", scaleKm: 20, hintLevel: 3, bboxes: [[139.68, 35.66, 139.79, 35.72], [139.7, 35.72, 139.79, 35.76]] },
+  m_shinjuku: { label: "新宿・渋谷", group: "市区町村｜東日本", scaleKm: 6, hintLevel: 3, bboxes: [[139.68, 35.68, 139.72, 35.71], [139.69, 35.65, 139.72, 35.67]] },
+  m_ueno: { label: "上野・浅草", group: "市区町村｜東日本", scaleKm: 6, hintLevel: 3, bboxes: [[139.77, 35.7, 139.81, 35.72]] },
+  m_hachioji: { label: "八王子市", group: "市区町村｜東日本", scaleKm: 10, hintLevel: 3, bboxes: [[139.3, 35.64, 139.37, 35.68]] },
+  m_yokohama: { label: "横浜市", group: "市区町村｜東日本", scaleKm: 16, hintLevel: 3, bboxes: [[139.6, 35.43, 139.67, 35.49]] },
+  m_kawasaki: { label: "川崎市", group: "市区町村｜東日本", scaleKm: 12, hintLevel: 3, bboxes: [[139.68, 35.52, 139.74, 35.56]] },
+  m_kamakura: { label: "鎌倉市", group: "市区町村｜東日本", scaleKm: 8, hintLevel: 3, bboxes: [[139.52, 35.3, 139.58, 35.34]] },
+  m_hakone: { label: "箱根町", group: "市区町村｜東日本", scaleKm: 10, hintLevel: 3, bboxes: [[139.01, 35.21, 139.1, 35.27]] },
+  m_niigata: { label: "新潟市", group: "市区町村｜東日本", scaleKm: 12, hintLevel: 3, bboxes: [[139.01, 37.89, 139.09, 37.94]] },
+  m_nagano: { label: "長野市", group: "市区町村｜東日本", scaleKm: 10, hintLevel: 3, bboxes: [[138.16, 36.62, 138.23, 36.67]] },
+  m_matsumoto: { label: "松本市", group: "市区町村｜東日本", scaleKm: 10, hintLevel: 3, bboxes: [[137.93, 36.21, 138.0, 36.26]] },
+  m_karuizawa: { label: "軽井沢町", group: "市区町村｜東日本", scaleKm: 8, hintLevel: 3, bboxes: [[138.57, 36.32, 138.66, 36.38]] },
+  m_kofu: { label: "甲府市", group: "市区町村｜東日本", scaleKm: 10, hintLevel: 3, bboxes: [[138.54, 35.64, 138.61, 35.69]] },
+  m_shizuoka: { label: "静岡市", group: "市区町村｜東日本", scaleKm: 12, hintLevel: 3, bboxes: [[138.35, 34.95, 138.43, 35.0]] },
+  m_hamamatsu: { label: "浜松市", group: "市区町村｜東日本", scaleKm: 12, hintLevel: 3, bboxes: [[137.69, 34.69, 137.77, 34.74]] },
+  m_toyama: { label: "富山市", group: "市区町村｜東日本", scaleKm: 10, hintLevel: 3, bboxes: [[137.18, 36.67, 137.25, 36.72]] },
+  m_kanazawa: { label: "金沢市", group: "市区町村｜東日本", scaleKm: 10, hintLevel: 3, bboxes: [[136.62, 36.55, 136.69, 36.6]] },
+  m_fukui: { label: "福井市", group: "市区町村｜東日本", scaleKm: 10, hintLevel: 3, bboxes: [[136.19, 36.04, 136.26, 36.09]] },
+
+  m_nagoya: { label: "名古屋市", group: "市区町村｜西日本", scaleKm: 16, hintLevel: 3, bboxes: [[136.86, 35.14, 136.94, 35.2]] },
+  m_gifu: { label: "岐阜市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[136.73, 35.39, 136.79, 35.44]] },
+  m_takayama: { label: "高山市", group: "市区町村｜西日本", scaleKm: 8, hintLevel: 3, bboxes: [[137.23, 36.12, 137.28, 36.17]] },
+  m_ise: { label: "伊勢市・鳥羽市", group: "市区町村｜西日本", scaleKm: 12, hintLevel: 3, bboxes: [[136.69, 34.46, 136.76, 34.51]] },
+  m_otsu: { label: "大津市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[135.84, 34.99, 135.91, 35.04]] },
+  m_kyoto: { label: "京都市", group: "市区町村｜西日本", scaleKm: 14, hintLevel: 3, bboxes: [[135.73, 34.98, 135.8, 35.04]] },
+  m_osaka_kita: { label: "大阪市（梅田）", group: "市区町村｜西日本", scaleKm: 8, hintLevel: 3, bboxes: [[135.48, 34.69, 135.53, 34.72]] },
+  m_osaka_namba: { label: "大阪市（難波・心斎橋）", group: "市区町村｜西日本", scaleKm: 8, hintLevel: 3, bboxes: [[135.49, 34.65, 135.53, 34.68]] },
+  m_sakai: { label: "堺市", group: "市区町村｜西日本", scaleKm: 12, hintLevel: 3, bboxes: [[135.46, 34.55, 135.53, 34.6]] },
+  m_kobe: { label: "神戸市", group: "市区町村｜西日本", scaleKm: 14, hintLevel: 3, bboxes: [[135.16, 34.67, 135.23, 34.72]] },
+  m_himeji: { label: "姫路市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[134.67, 34.81, 134.73, 34.86]] },
+  m_nara: { label: "奈良市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[135.78, 34.66, 135.85, 34.71]] },
+  m_wakayama: { label: "和歌山市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[135.15, 34.21, 135.21, 34.26]] },
+  m_okayama: { label: "岡山市", group: "市区町村｜西日本", scaleKm: 12, hintLevel: 3, bboxes: [[133.89, 34.64, 133.96, 34.69]] },
+  m_kurashiki: { label: "倉敷市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[133.75, 34.57, 133.82, 34.62]] },
+  m_hiroshima: { label: "広島市", group: "市区町村｜西日本", scaleKm: 14, hintLevel: 3, bboxes: [[132.43, 34.37, 132.5, 34.42]] },
+  m_onomichi: { label: "尾道市", group: "市区町村｜西日本", scaleKm: 8, hintLevel: 3, bboxes: [[133.18, 34.39, 133.23, 34.43]] },
+  m_matsue: { label: "松江市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[133.02, 35.44, 133.09, 35.49]] },
+  m_tottori: { label: "鳥取市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[134.2, 35.47, 134.26, 35.52]] },
+  m_shimonoseki: { label: "下関市・山口市", group: "市区町村｜西日本", scaleKm: 14, hintLevel: 3, bboxes: [[130.91, 33.93, 130.98, 33.98], [131.45, 34.16, 131.5, 34.2]] },
+  m_takamatsu: { label: "高松市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[134.02, 34.32, 134.08, 34.37]] },
+  m_tokushima: { label: "徳島市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[134.52, 34.05, 134.58, 34.1]] },
+  m_matsuyama: { label: "松山市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[132.74, 33.82, 132.8, 33.87]] },
+  m_kochi: { label: "高知市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[133.51, 33.54, 133.57, 33.59]] },
+  m_fukuoka: { label: "福岡市", group: "市区町村｜西日本", scaleKm: 14, hintLevel: 3, bboxes: [[130.38, 33.57, 130.44, 33.62]] },
+  m_kitakyushu: { label: "北九州市", group: "市区町村｜西日本", scaleKm: 12, hintLevel: 3, bboxes: [[130.85, 33.86, 130.92, 33.91]] },
+  m_saga: { label: "佐賀市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[130.27, 33.23, 130.33, 33.28]] },
+  m_nagasaki: { label: "長崎市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[129.85, 32.73, 129.9, 32.78]] },
+  m_kumamoto: { label: "熊本市", group: "市区町村｜西日本", scaleKm: 12, hintLevel: 3, bboxes: [[130.68, 32.78, 130.74, 32.83]] },
+  m_oita: { label: "大分市・別府市", group: "市区町村｜西日本", scaleKm: 14, hintLevel: 3, bboxes: [[131.6, 33.22, 131.65, 33.26], [131.48, 33.27, 131.53, 33.31]] },
+  m_miyazaki: { label: "宮崎市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[131.4, 31.89, 131.46, 31.94]] },
+  m_kagoshima: { label: "鹿児島市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[130.52, 31.56, 130.58, 31.61]] },
+  m_naha: { label: "那覇市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[127.65, 26.19, 127.72, 26.24]] },
+  m_chatan: { label: "北谷町・宜野湾市", group: "市区町村｜西日本", scaleKm: 10, hintLevel: 3, bboxes: [[127.73, 26.29, 127.79, 26.35]] },
+
   /* ---------- 海外（hintLevel:1 = 国は自明なので州・都市から） ---------- */
-  c_korea: { label: "韓国", group: "アジア", scaleKm: 400, hintLevel: 1,
+  c_korea: { label: "韓国", group: "海外｜アジア", scaleKm: 400, hintLevel: 1,
     bboxes: [[126.85, 37.45, 127.15, 37.65], [129.0, 35.1, 129.2, 35.25], [128.5, 35.8, 128.7, 35.95]] },
-  c_taiwan: { label: "台湾", group: "アジア", scaleKm: 350, hintLevel: 1,
+  c_taiwan: { label: "台湾", group: "海外｜アジア", scaleKm: 350, hintLevel: 1,
     bboxes: [[121.45, 25.0, 121.62, 25.12], [120.6, 24.12, 120.75, 24.22], [120.25, 22.6, 120.4, 22.72]] },
-  c_thailand: { label: "タイ", group: "アジア", scaleKm: 800, hintLevel: 1,
+  c_thailand: { label: "タイ", group: "海外｜アジア", scaleKm: 800, hintLevel: 1,
     bboxes: [[100.45, 13.68, 100.65, 13.82], [98.95, 18.75, 99.05, 18.82]] },
-  c_singapore: { label: "シンガポール", group: "アジア", scaleKm: 50, hintLevel: 1,
+  c_singapore: { label: "シンガポール", group: "海外｜アジア", scaleKm: 50, hintLevel: 1,
     bboxes: [[103.75, 1.27, 103.9, 1.37]] },
-  c_usa: { label: "アメリカ", group: "北米", scaleKm: 4000, hintLevel: 1,
+  c_usa: { label: "アメリカ", group: "海外｜北米", scaleKm: 4000, hintLevel: 1,
     bboxes: [[-74.02, 40.7, -73.93, 40.79], [-118.35, 34.02, -118.2, 34.12], [-122.45, 37.74, -122.38, 37.8],
              [-87.7, 41.85, -87.6, 41.93], [-122.36, 47.58, -122.29, 47.65], [-97.78, 30.24, -97.7, 30.31]] },
-  c_canada: { label: "カナダ", group: "北米", scaleKm: 3000, hintLevel: 1,
+  c_canada: { label: "カナダ", group: "海外｜北米", scaleKm: 3000, hintLevel: 1,
     bboxes: [[-79.42, 43.63, -79.35, 43.7], [-123.15, 49.24, -123.06, 49.3], [-73.6, 45.48, -73.53, 45.54]] },
-  c_mexico: { label: "メキシコ", group: "北米", scaleKm: 1500, hintLevel: 1,
+  c_mexico: { label: "メキシコ", group: "海外｜北米", scaleKm: 1500, hintLevel: 1,
     bboxes: [[-99.18, 19.38, -99.1, 19.45], [-103.38, 20.65, -103.3, 20.72]] },
-  c_uk: { label: "イギリス", group: "ヨーロッパ", scaleKm: 700, hintLevel: 1,
+  c_uk: { label: "イギリス", group: "海外｜ヨーロッパ", scaleKm: 700, hintLevel: 1,
     bboxes: [[-0.2, 51.48, -0.05, 51.55], [-2.28, 53.45, -2.2, 53.5], [-3.2, 55.93, -3.13, 55.97]] },
-  c_france: { label: "フランス", group: "ヨーロッパ", scaleKm: 800, hintLevel: 1,
+  c_france: { label: "フランス", group: "海外｜ヨーロッパ", scaleKm: 800, hintLevel: 1,
     bboxes: [[2.28, 48.83, 2.4, 48.89], [4.82, 45.74, 4.88, 45.78], [5.35, 43.28, 5.42, 43.32]] },
-  c_germany: { label: "ドイツ", group: "ヨーロッパ", scaleKm: 700, hintLevel: 1,
+  c_germany: { label: "ドイツ", group: "海外｜ヨーロッパ", scaleKm: 700, hintLevel: 1,
     bboxes: [[13.35, 52.49, 13.45, 52.54], [11.54, 48.12, 11.62, 48.17], [9.98, 53.53, 10.05, 53.58]] },
-  c_italy: { label: "イタリア", group: "ヨーロッパ", scaleKm: 900, hintLevel: 1,
+  c_italy: { label: "イタリア", group: "海外｜ヨーロッパ", scaleKm: 900, hintLevel: 1,
     bboxes: [[12.45, 41.88, 12.53, 41.93], [9.16, 45.45, 9.23, 45.5], [11.24, 43.76, 11.29, 43.79]] },
-  c_spain: { label: "スペイン", group: "ヨーロッパ", scaleKm: 800, hintLevel: 1,
+  c_spain: { label: "スペイン", group: "海外｜ヨーロッパ", scaleKm: 800, hintLevel: 1,
     bboxes: [[-3.72, 40.4, -3.65, 40.45], [2.15, 41.38, 2.2, 41.42], [-5.99, 37.38, -5.97, 37.4]] },
-  c_netherlands: { label: "オランダ", group: "ヨーロッパ", scaleKm: 250, hintLevel: 1,
+  c_netherlands: { label: "オランダ", group: "海外｜ヨーロッパ", scaleKm: 250, hintLevel: 1,
     bboxes: [[4.86, 52.35, 4.93, 52.39], [4.45, 51.9, 4.52, 51.94]] },
-  c_sweden: { label: "スウェーデン", group: "ヨーロッパ", scaleKm: 900, hintLevel: 1,
+  c_sweden: { label: "スウェーデン", group: "海外｜ヨーロッパ", scaleKm: 900, hintLevel: 1,
     bboxes: [[18.03, 59.31, 18.11, 59.35], [11.95, 57.69, 12.02, 57.73], [13.0, 55.58, 13.05, 55.61]] },
-  c_australia: { label: "オーストラリア", group: "その他", scaleKm: 3000, hintLevel: 1,
+  c_australia: { label: "オーストラリア", group: "海外｜その他", scaleKm: 3000, hintLevel: 1,
     bboxes: [[151.18, -33.89, 151.25, -33.85], [144.94, -37.83, 145.0, -37.79], [153.0, -27.49, 153.06, -27.45]] },
-  c_brazil: { label: "ブラジル", group: "その他", scaleKm: 3000, hintLevel: 1,
+  c_brazil: { label: "ブラジル", group: "海外｜その他", scaleKm: 3000, hintLevel: 1,
     bboxes: [[-46.66, -23.57, -46.6, -23.53], [-43.22, -22.93, -43.15, -22.89]] },
 };
 
@@ -239,7 +312,7 @@ export function regionScaleKm(region: RegionKey): number {
 }
 
 /** そのエリアで最初に出すヒントの粒度 */
-export function regionHintLevel(region: RegionKey): 0 | 1 | 2 {
+export function regionHintLevel(region: RegionKey): HintLevel {
   return REGION_DEFS[region]?.hintLevel ?? 0;
 }
 
@@ -493,7 +566,7 @@ export async function findStreetPoint(
 ): Promise<StreetSpot | null> {
   const scale = regionScaleKm(region);
   // 狭いエリアほど「前回と同じ場所」を避ける距離も狭くしないと、候補が尽きる
-  const minSeparationKm = Math.max(0.6, Math.min(50, scale / 60));
+  const minSeparationKm = Math.max(0.3, Math.min(50, scale / 60));
   let lastResort: StreetSpot | null = null;
 
   for (let attempt = 0; attempt < 14; attempt++) {
@@ -559,12 +632,17 @@ export async function moveAI(
   pursuers: LatLng[] = []
 ): Promise<(StreetSpot & { bearing: number }) | null> {
   const { bearing: baseBearing, pressureKm } = escapeBearing(current, pursuers, lastBearing);
+  const scale = regionScaleKm(region);
 
   const jumpChance = pressureKm < 5 ? 0.55 : pressureKm < 30 ? 0.35 : 0.2;
   const shouldJump = Math.random() < jumpChance;
 
   if (!shouldJump) {
-    const steps = pressureKm < 5 ? [4.0, 2.4, 1.2, 0.6] : [1.2, 2.4, 0.6, 4.0];
+    // 市区町村など狭いエリアでは移動距離も詰めないと、すぐ範囲外へ出てしまう
+    const unit = Math.max(0.25, Math.min(1, scale / 100));
+    const base = pressureKm < 5 ? [4.0, 2.4, 1.2, 0.6] : [1.2, 2.4, 0.6, 4.0];
+    const steps = base.map((d) => d * unit);
+
     for (const distanceKm of steps) {
       const bearing = (baseBearing + (Math.random() * 30 - 15) + 360) % 360;
       const nextPoint = destinationPoint(current, bearing, distanceKm);
@@ -720,16 +798,17 @@ export async function reverseGeocode(point: LatLng, kv?: KVNamespace): Promise<P
  *   国・地域 → 都道府県・州 → 市区町村 → おおよその緯度経度 → 詳しい座標
  *
  * ただし hintLevel より粗いヒントは省く。
- * たとえば「大阪府」を選んで遊んでいるなら、国と都道府県は最初から分かって
- * いるので出さず、市区町村から始める。
+ *   日本全国を選択  → 国は自明なので都道府県から
+ *   大阪府を選択    → 都道府県も自明なので市区町村から
+ *   大阪市を選択    → 市区町村も自明なので緯度経度から
  */
-export async function buildPlaceHints(point: LatLng, kv?: KVNamespace, hintLevel: 0 | 1 | 2 = 0): Promise<string[]> {
+export async function buildPlaceHints(point: LatLng, kv?: KVNamespace, hintLevel: HintLevel = 0): Promise<string[]> {
   const place = await reverseGeocode(point, kv);
   const hints: string[] = [];
 
   if (hintLevel <= 0 && place.country) hints.push(`国・地域: ${place.country}`);
   if (hintLevel <= 1 && place.state) hints.push(`都道府県・州: ${place.state}`);
-  if (place.city) hints.push(`市区町村: ${place.city}`);
+  if (hintLevel <= 2 && place.city) hints.push(`市区町村: ${place.city}`);
   hints.push(`おおよその緯度: ${Math.round(point.lat)}° / 経度: ${Math.round(point.lng)}°`);
   hints.push(`詳しい座標: ${point.lat.toFixed(2)}, ${point.lng.toFixed(2)}`);
 

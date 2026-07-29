@@ -7,27 +7,33 @@ import "./styles.css";
 import { registerPwa } from "./lib/registerPwa";
 
 /**
- * 広告バーの高さを実測して CSS 変数 --ad-h に流し込む。
+ * 広告枠の高さを実測して、余白を残さないようにする。
  *
- * 以前は CSS で 50px を固定で予約していたため、
- *  ・広告が実際にはそれより小さい
- *  ・そもそも配信されない
- * ときに、その差分が画面下の「何もない黒い帯」として残っていた。
- * ここで実寸に合わせることで、余った高さは全部ゲーム画面に回る。
+ * CSSで高さを固定で予約すると、広告が小さい／配信されないときに
+ * その差分が黒い空白として残る。ここで実寸に合わせる。
+ *
+ * PC枠については「枠が見えているのに中身が空」なのか
+ * 「枠ごと消えている」のかを切り分けられるよう、
+ * 配信の有無を data 属性に出しておく（DevToolsで確認できる）。
  */
-function trackAdBar() {
-  const bar = document.querySelector<HTMLElement>(".ad-bar");
+function trackAdSlot(barSelector: string, slotSelector: string) {
+  const bar = document.querySelector<HTMLElement>(barSelector);
   if (!bar) return;
-  const slot = bar.querySelector<HTMLElement>("#ad-sp") ?? bar;
+  const slot = bar.querySelector<HTMLElement>(slotSelector) ?? bar;
 
   const apply = () => {
     // 畳んだ状態のままだと中身を測れないので、いったん元に戻してから測る
     bar.classList.remove("is-empty");
     const contentHeight = Math.max(slot.scrollHeight, Math.round(slot.getBoundingClientRect().height));
-    const empty = contentHeight < 8; // 8px未満は「配信なし」とみなす
-    bar.classList.toggle("is-empty", empty);
-    const barHeight = empty ? 0 : Math.round(bar.getBoundingClientRect().height);
-    document.documentElement.style.setProperty("--ad-h", `${barHeight}px`);
+    const filled = contentHeight >= 8;
+    bar.classList.toggle("is-empty", !filled);
+    bar.dataset.adFilled = filled ? "yes" : "no";
+    bar.dataset.adHeight = String(contentHeight);
+
+    if (barSelector === ".ad-bar") {
+      const barHeight = filled ? Math.round(bar.getBoundingClientRect().height) : 0;
+      document.documentElement.style.setProperty("--ad-h", `${barHeight}px`);
+    }
   };
 
   apply();
@@ -42,15 +48,18 @@ function trackAdBar() {
   window.addEventListener("resize", () => window.setTimeout(apply, 150));
 }
 
+function trackAds() {
+  // スマホ用の下部バー
+  trackAdSlot(".ad-bar", "#ad-sp");
+  // PC用の右下レクタングル。中身が入らなければ枠ごと畳む
+  trackAdSlot("#ad-pc-rect", "#ad-pc-rect");
+}
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <App />
   </React.StrictMode>
 );
 
-// 旧タイル提供元のキャッシュを掃除する（OSM公式・NASA GIBSは使わなくなった）
-["osm-tiles", "gibs-tiles"].forEach((name) => caches?.delete?.(name).catch(() => {}));
-
-trackAdBar();
+trackAds();
 registerPwa();
-

@@ -982,7 +982,7 @@ code {
 
 /* ---------- 広告枠 ----------
    高さは予約しない（中身の実寸に合わせる）。
-   配信が無ければ main.tsx が .is-empty を付け、枠ごと畳む。 */
+   配信が無ければ main.tsx の trackAdSlot() が .is-empty を付け、枠ごと畳む。 */
 
 .ad-bar {
   flex: 0 0 auto;
@@ -1027,6 +1027,15 @@ code {
 /* PCレクタングルは既定で非表示。fixedにするので flow には影響しない */
 #ad-pc-rect {
   display: none;
+}
+
+/* 配信が無かったときは枠ごと畳む（空の黒い箱を残さない）。
+   display:none にしないのは、あとから広告が入ったときに
+   高さを測り直せなくなるため */
+#ad-pc-rect.is-empty {
+  min-height: 0;
+  border: none;
+  background: none;
 }
 
 /* ==========================================================================
