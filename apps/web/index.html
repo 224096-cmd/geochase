@@ -2,13 +2,11 @@
 <html lang="ja">
   <head>
     <meta charset="UTF-8" />
-    <!-- maximum-scale=1 は端末のピンチ拡大を潰すので付けない -->
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#070C0B" />
     <meta name="description" content="GeoChase: ストリートビューで場所を当てる位置推理ゲーム。移動し続ける逃走者を追いかける「逃走モード」も搭載。" />
 
-    <!-- iOSのホーム画面アプリ用。manifestだけでは全画面表示にならない -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="GeoChase" />
@@ -22,10 +20,8 @@
     <meta property="og:image" content="/icon-512.png" />
     <meta name="twitter:card" content="summary" />
 
-    <!--
-      Google Search Console の「HTMLタグ」による所有権確認用。
-      Search Consoleで発行された content="xxxxxxxx" の値に置き換えてください。
-    -->
+    <link rel="preconnect" href="https://adm.shinobi.jp" crossorigin />
+
     <meta name="google-site-verification" content="oHmE_f6ogd0ZE4WmHBdncsZGod_A0JaotcU5iLCqmXA" />
 
     <title>GeoChase - 場所当て×追跡ゲーム</title>
@@ -40,30 +36,34 @@
     </noscript>
 
     <!--
-      広告はサイズごとに置き場所を分ける。
-      admaxは document.write で挿入するため async は付けられない（付けると何も表示されない）。
-      ・スマホ(320x50相当) → 画面下のバー
-      ・PC レクタングル(300x250) → 右下に固定
-
-      外枠と、広告が差し込まれる内側の箱は必ず分ける。
-      main.tsx が「内側を測って、外枠を畳む」構造になっており、
-      同じ要素だと監視が自分自身の書き換えで再発火して固まるため。
+      広告は専用HTMLをiframeで読み込む。
+      admaxのタグは document.write で中身を書き込むため、SPA本体のHTMLに
+      直接置くとReactのマウントやService Workerの介入と競合して描画されないことがある。
+      iframeの中の文書は読み込み時に解析されるので document.write が必ず効く。
+      スマホは画面最下部の320x50、PCは右下の300x250。
     -->
-    <div class="ad-bar is-empty">
-      <div id="ad-sp">
-        <!-- admax -->
-        <script src="https://adm.shinobi.jp/s/4b552c0531166d62690915a9f9ce5c62"></script>
-        <!-- admax -->
-      </div>
+    <div class="ad-bar">
+      <iframe
+        class="ad-frame"
+        src="/ads/sp.html"
+        title="広告"
+        width="320"
+        height="50"
+        scrolling="no"
+        loading="eager"
+      ></iframe>
     </div>
 
-    <!-- PC用 300x250。CSS側で幅300px・高さ250pxを確保している -->
-    <div id="ad-pc-rect">
-      <div id="ad-pc-slot">
-        <!-- admax -->
-        <script src="https://adm.shinobi.jp/s/9b2f8ed401aabbe954516e6622bad18c"></script>
-        <!-- admax -->
-      </div>
+    <div class="ad-pc">
+      <iframe
+        class="ad-frame"
+        src="/ads/pc.html"
+        title="広告"
+        width="300"
+        height="250"
+        scrolling="no"
+        loading="eager"
+      ></iframe>
     </div>
 
     <script type="module" src="/src/main.tsx"></script>

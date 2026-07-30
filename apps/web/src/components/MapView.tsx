@@ -17,57 +17,31 @@ function makePinIcon(color: string) {
 const guessPinIcon = makePinIcon("#E0483E");
 const targetPinIcon = makePinIcon("#4FD1A5");
 
-/* ==========================================================================
-   地図タイル — 完全無料・商用利用可のものだけで構成する
-
-   ■ 地図（street map）: OpenFreeMap
-     ・登録もAPIキーも不要。表示数・リクエスト数とも無制限、商用利用可
-     ・世界中をカバーし、ベクターなので拡大しても文字が潰れない
-     ・読み込みに失敗したら地理院タイル（ラスタ）へ自動で退避する
-     tile.openstreetmap.org の公式ラスタタイルは「アプリ配布のような重い利用は
-     事前許可なしには禁止」というポリシーがあるため使っていない。
-
-   ■ 写真（航空・衛星）: 地理院タイル
-     ・完全無料・キー不要・商用可（出典明示のみ）
-     ・オルソ化した航空写真の合成なので雲がほぼ写らない
-     ・日本国内はズーム18まで。ズーム2〜8は世界衛星モザイクで全世界
-
-   ■ 写真の上の地名
-     地理院「標準地図」を mix-blend-mode: multiply で重ねる。
-     白い背景は写真をそのまま通し（白×画像=画像）、黒い文字と道路だけが
-     写真の上に焼き付く。ラスタだけで完結するので確実に動く。
-     ベクターのラベル専用スタイルを重ねる方式も試したが、
-     描画されないケースがあり信頼できなかったので採らなかった。
-     この方式は日本国内のみ有効（航空写真の高ズームも日本のみなので実害はない）。
-   ========================================================================== */
-
+// 地図タイルは完全無料・商用可のものだけ。
+// tile.openstreetmap.org は重い利用が禁止されているため使わない
 const OFM_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 
 const GSI_LIST_URL = "https://maps.gsi.go.jp/development/ichiran.html";
-/** 淡色地図。OpenFreeMapが使えないときのベースマップ */
 const GSI_PALE_URL = "https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png";
-/** 標準地図。写真の上に重ねて地名・道路を読めるようにする */
 const GSI_STD_URL = "https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png";
-/** 全国最新写真（シームレス航空写真） */
 const GSI_PHOTO_URL = "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg";
 
-/** 404時に赤いバツ画像を出さないための透明1pxタイル */
 const BLANK_TILE = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 
-/** 世界の航空写真を高ズームまで足したい場合だけ設定する（任意） */
 const WORLD_PHOTO_URL = import.meta.env.VITE_WORLD_PHOTO_URL as string | undefined;
 const WORLD_ATTRIBUTION = (import.meta.env.VITE_WORLD_ATTRIBUTION as string | undefined) ?? "";
 const WORLD_TILE_SIZE = Number(import.meta.env.VITE_WORLD_TILE_SIZE ?? 256) || 256;
 
 const CREDITS = [
   "地図: © OpenFreeMap © OpenMapTiles © OpenStreetMap contributors",
+  "ストリート画像: © Mapillary contributors（CC BY-SA 4.0）",
+  "地名検索: © OpenStreetMap contributors / Nominatim（ODbL）",
   "航空写真・地名: 国土地理院「地理院タイル」（写真・標準地図・淡色地図）",
   "写真 ズーム9〜13: データソース：Landsat8画像（GSI,TSIC,GEO Grid/AIST）, Landsat8画像（courtesy of the U.S. Geological Survey）, 海底地形（GEBCO）",
   "写真 ズーム2〜8: Images on 世界衛星モザイク画像 obtained from site https://lpdaac.usgs.gov/data_access maintained by the NASA Land Processes Distributed Active Archive Center (LP DAAC), USGS/Earth Resources Observation and Science (EROS) Center, Sioux Falls, South Dakota. Source of image data product.",
   "一部にGRUS画像（© Axelspace）を含みます。",
 ];
 
-/** 地理院タイルが高ズームに対応している範囲（日本とその周辺） */
 const JAPAN = { minLat: 20.0, maxLat: 46.5, minLng: 122.0, maxLng: 154.0 };
 
 function insideJapan(lat: number, lng: number) {
@@ -76,7 +50,6 @@ function insideJapan(lat: number, lng: number) {
 
 type LayerKey = "map" | "photo";
 
-/** 緯度経度を読みやすい桁で文字列にする（小数5桁 ≒ 1m） */
 function formatLatLng(p: LatLng) {
   return `${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}`;
 }
@@ -85,15 +58,12 @@ interface Props {
   onPick: (lat: number, lng: number) => void;
   markerPosition?: LatLng | null;
   targetPosition?: LatLng | null;
-  /** 決着済みラウンドで逃走者がいた場所 */
   trail?: TrailPoint[];
-  /** 回答受付中でないときはピンを動かせないようにする */
   locked?: boolean;
-  /** 小窓表示中。操作系をすべて隠す */
   compact?: boolean;
-  /** ピン地点の下見。押せないときは undefined */
   onExplore?: () => void;
   exploreLoading?: boolean;
+  panTo?: LatLng | null;
 }
 
 export default function MapView({
@@ -105,6 +75,7 @@ export default function MapView({
   compact = false,
   onExplore,
   exploreLoading = false,
+  panTo = null,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -113,37 +84,31 @@ export default function MapView({
   const resultLine = useRef<L.Polyline | null>(null);
   const trailLayer = useRef<L.LayerGroup | null>(null);
 
-  /** ベクター地図（OpenFreeMap）。読み込みに失敗したら null のまま */
   const vectorBase = useRef<L.Layer | null>(null);
-  /** ベクターが使えないときのラスタ地図（地理院淡色地図） */
   const rasterBase = useRef<L.TileLayer | null>(null);
-  /** 航空写真 */
   const photoBase = useRef<L.LayerGroup | null>(null);
-  /** 写真の上に重ねる地名（地理院標準地図） */
   const labelsLayer = useRef<L.TileLayer | null>(null);
 
   const onPickRef = useRef(onPick);
   const lockedRef = useRef(locked);
   const layerRef = useRef<LayerKey>("map");
+  const lastPanRef = useRef("");
 
   const [layer, setLayer] = useState<LayerKey>("map");
   const [labelsOn, setLabelsOn] = useState(true);
   const [tilesLoading, setTilesLoading] = useState(false);
   const [showCredits, setShowCredits] = useState(false);
   const [copied, setCopied] = useState(false);
-  /** 航空写真が高ズームに無い範囲（世界タイル未設定 かつ 日本国外）にいる */
   const [outOfPhotoRange, setOutOfPhotoRange] = useState(false);
 
   onPickRef.current = onPick;
   lockedRef.current = locked;
   layerRef.current = layer;
 
-  /* --- 初期化（1回だけ） --- */
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
     const map = L.map(containerRef.current, {
-      // ダブルタップで拡大できた方が片手操作しやすい
       doubleClickZoom: true,
       zoomControl: false,
       worldCopyJump: true,
@@ -158,7 +123,6 @@ export default function MapView({
     L.control.zoom({ position: "topright" }).addTo(map);
     map.attributionControl.setPrefix("");
 
-    /* --- 航空写真レイヤー --- */
     const photo = L.layerGroup();
     if (WORLD_PHOTO_URL) {
       L.tileLayer(WORLD_PHOTO_URL, {
@@ -175,7 +139,6 @@ export default function MapView({
       attribution: `<a href="${GSI_LIST_URL}" target="_blank" rel="noreferrer">地理院タイル</a>（写真）`,
       maxZoom: 19,
       maxNativeZoom: 18,
-      // 世界タイルがあるときは、地理院の粗い世界モザイクで上書きしない
       minZoom: WORLD_PHOTO_URL ? 9 : 2,
       errorTileUrl: BLANK_TILE,
       zIndex: 2,
@@ -185,9 +148,7 @@ export default function MapView({
     gsiPhoto.addTo(photo);
     photoBase.current = photo;
 
-    /* --- 写真の上に重ねる地名 --- *
-       className を付けて CSS 側で mix-blend-mode: multiply を効かせる。
-       白背景は写真を素通しし、文字と道路だけが残る。 */
+    // 写真の上に標準地図を multiply で重ねると、白背景は写真を通し文字と道路だけが残る
     labelsLayer.current = L.tileLayer(GSI_STD_URL, {
       maxZoom: 19,
       maxNativeZoom: 18,
@@ -196,7 +157,6 @@ export default function MapView({
       zIndex: 5,
     });
 
-    /* --- 地図レイヤー（まずラスタで出しておき、ベクターが来たら差し替える） --- */
     const raster = L.tileLayer(GSI_PALE_URL, {
       attribution: `<a href="${GSI_LIST_URL}" target="_blank" rel="noreferrer">地理院タイル</a>（淡色地図）`,
       maxZoom: 19,
@@ -215,7 +175,6 @@ export default function MapView({
       onPickRef.current(e.latlng.lat, e.latlng.lng);
     });
 
-    // 地理院の航空写真は日本国内のみ高ズームに対応している
     const checkPhotoRange = () => {
       if (WORLD_PHOTO_URL) {
         setOutOfPhotoRange(false);
@@ -229,15 +188,12 @@ export default function MapView({
 
     mapRef.current = map;
 
-    /* --- OpenFreeMap（MapLibre）を後から読み込む --- *
-       重いライブラリなので初期表示をブロックしない。
-       読み込みに失敗しても地理院ラスタのまま動き続ける。 */
+    // MapLibreは重いので後から読み込む。失敗しても地理院ラスタのまま動く
     let disposed = false;
     (async () => {
       try {
         const maplibre = await import("maplibre-gl");
         await import("maplibre-gl/dist/maplibre-gl.css");
-        // プラグインはグローバルの maplibregl / L を参照するUMDスクリプト
         (window as any).maplibregl = (maplibre as any).default ?? maplibre;
         (window as any).L = L;
         await import("@maplibre/maplibre-gl-leaflet");
@@ -248,7 +204,6 @@ export default function MapView({
           attribution: "© OpenFreeMap © OpenMapTiles © OpenStreetMap contributors",
         });
 
-        // すでに地図タブを見ているなら、その場でベクターへ差し替える
         if (layerRef.current === "map" && mapRef.current && vectorBase.current) {
           mapRef.current.removeLayer(raster);
           vectorBase.current.addTo(mapRef.current);
@@ -258,7 +213,6 @@ export default function MapView({
       }
     })();
 
-    // 小窓⇔全画面の切り替えでサイズが変わるので追従させる
     const observer = new ResizeObserver(() => map.invalidateSize({ animate: false }));
     observer.observe(containerRef.current);
 
@@ -270,7 +224,6 @@ export default function MapView({
     };
   }, []);
 
-  /* --- 表示サイズが変わったら再計測 --- */
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -278,7 +231,6 @@ export default function MapView({
     return () => window.clearTimeout(t);
   }, [compact]);
 
-  /* --- レイヤー切り替え（地図 ⇔ 写真、地名の on/off） --- */
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -303,14 +255,12 @@ export default function MapView({
       }
     }
 
-    // 表示範囲の案内を更新する
     if (!WORLD_PHOTO_URL) {
       const c = map.getCenter();
       setOutOfPhotoRange(layer === "photo" && map.getZoom() >= 9 && !insideJapan(c.lat, c.lng));
     }
   }, [layer, labelsOn]);
 
-  /* --- 自分のピン --- */
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -323,7 +273,6 @@ export default function MapView({
     if (guessMarker.current) {
       guessMarker.current.setLatLng(latlng);
     } else {
-      // タップだけだと数十m単位でしか置けないので、ドラッグで微調整できるようにする
       const marker = L.marker(latlng, { icon: guessPinIcon, keyboard: false, draggable: true, autoPan: true }).addTo(map);
       marker.on("dragend", () => {
         const p = marker.getLatLng();
@@ -334,7 +283,17 @@ export default function MapView({
     guessMarker.current.dragging?.[locked ? "disable" : "enable"]();
   }, [markerPosition, locked]);
 
-  /* --- 正解ピンと結果ライン --- */
+  // 下見中の地点へ追従する。ズームは維持して中心だけ寄せる
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !panTo) return;
+    const key = `${panTo.lat.toFixed(6)},${panTo.lng.toFixed(6)}`;
+    if (key === lastPanRef.current) return;
+    lastPanRef.current = key;
+    const zoom = Math.max(map.getZoom(), 15);
+    map.setView(L.latLng(panTo.lat, panTo.lng), zoom, { animate: true });
+  }, [panTo]);
+
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -366,7 +325,6 @@ export default function MapView({
     }
   }, [targetPosition, markerPosition]);
 
-  /* --- 逃走者の軌跡 --- */
   useEffect(() => {
     const group = trailLayer.current;
     if (!group) return;
@@ -380,8 +338,6 @@ export default function MapView({
 
     points.forEach((p, i) => {
       const isLatest = i === points.length - 1;
-      // ラウンド番号はサーバーが送ってくるものを使う。
-      // 配列の添字だと、古い分が切り捨てられたときにズレて別ラウンドの番号が出てしまう
       const round = trail[i].round ?? i + 1;
       L.circleMarker(p, {
         radius: isLatest ? 8 : 5,
@@ -417,9 +373,7 @@ export default function MapView({
       await navigator.clipboard.writeText(formatLatLng(markerPosition));
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1600);
-    } catch {
-      /* クリップボードが使えない環境 */
-    }
+    } catch {}
   };
 
   return (
@@ -433,7 +387,6 @@ export default function MapView({
         </div>
       )}
 
-      {/* ピンを置いた場所の座標。タップでコピーできる */}
       {markerPosition && !compact && (
         <button type="button" className="map-coords" onClick={(e) => { e.stopPropagation(); copyCoords(); }}>
           <span className="map-coords-label">ピンの座標</span>
@@ -505,7 +458,6 @@ export default function MapView({
         )}
       </div>
 
-      {/* 低ズーム側は他機関のデータを含むため、全文の出所を出せるようにする */}
       {!compact && (
         <>
           <button

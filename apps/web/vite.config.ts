@@ -4,7 +4,6 @@ import { VitePWA } from "vite-plugin-pwa";
 
 export default defineConfig({
   server: {
-    // 同じWi-Fiのスマホから http://<PCのIP>:5173 で実機確認できるようにする
     host: true,
     port: 5173,
   },
@@ -13,14 +12,12 @@ export default defineConfig({
     sourcemap: false,
     rollupOptions: {
       output: {
-        // mapillary-js / maplibre-gl / leaflet は重いので初期表示のJSから切り離す
         manualChunks: {
           leaflet: ["leaflet"],
           react: ["react", "react-dom"],
         },
       },
     },
-    // maplibre-gl と mapillary-js はどちらも大きい。警告のしきい値を上げておく
     chunkSizeWarningLimit: 1600,
   },
   plugins: [
@@ -46,7 +43,6 @@ export default defineConfig({
         icons: [
           { src: "icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
           { src: "icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
-          // maskableが無いとAndroidでアイコンが白い四角に切り抜かれる
           { src: "icon-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
         ],
         shortcuts: [
@@ -56,17 +52,15 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ["**/*.{js,css,html,png,svg,webmanifest,woff2}"],
-        // mapillary-js は約1MB、maplibre-gl も大きい。初回訪問でいきなり落とすと重いので、
-        // プリキャッシュから外して「実際に使うとき」に取得＋キャッシュする
-        globIgnores: ["**/mapillary*.js", "**/maplibre*.js"],
-        // SPAなので、未知のパスはindex.htmlに戻す
+        globIgnores: ["**/mapillary*.js", "**/maplibre*.js", "ads/*.html"],
         navigateFallback: "index.html",
-        navigateFallbackDenylist: [/^\/api\//],
+        // /ads/ を除外しないと、iframeの読み込みがナビゲーション扱いになり
+        // index.html が返ってiframeの中にアプリ本体が入る（広告が出なくなる）
+        navigateFallbackDenylist: [/^\/api\//, /^\/ads\//],
         cleanupOutdatedCaches: true,
         maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
         runtimeCaching: [
           {
-            // プリキャッシュから外した大きいチャンクを、初回取得時にキャッシュする
             urlPattern: /\/assets\/(mapillary|maplibre).*\.js$/,
             handler: "CacheFirst",
             options: {
@@ -76,7 +70,6 @@ export default defineConfig({
             },
           },
           {
-            // OpenFreeMap のベクタータイル・フォント・スプライト
             urlPattern: /^https:\/\/tiles\.openfreemap\.org\/.*/i,
             handler: "CacheFirst",
             options: {
@@ -86,7 +79,6 @@ export default defineConfig({
             },
           },
           {
-            // 地理院タイル（航空写真・淡色地図）
             urlPattern: /^https:\/\/cyberjapandata\.gsi\.go\.jp\/xyz\/.*/i,
             handler: "CacheFirst",
             options: {
@@ -96,17 +88,7 @@ export default defineConfig({
             },
           },
           {
-            // VITE_WORLD_PHOTO_URL に ArcGIS 等を設定したとき用。未設定なら一致しない
-            urlPattern: /^https:\/\/.*\.arcgis\.com\/.*/i,
-            handler: "CacheFirst",
-            options: {
-              cacheName: "world-tiles",
-              expiration: { maxEntries: 500, maxAgeSeconds: 60 * 60 * 24 * 14 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-          {
-            // Mapillaryの画像は署名付きで期限があるため、短めのStaleWhileRevalidate
+            // Mapillaryの画像URLは署名付きで期限がある
             urlPattern: /^https:\/\/.*\.mapillary\.com\/.*/i,
             handler: "StaleWhileRevalidate",
             options: {
@@ -118,7 +100,6 @@ export default defineConfig({
         ],
       },
       devOptions: {
-        // 開発中もPWAの挙動を確認したいときは true にする
         enabled: false,
       },
     }),

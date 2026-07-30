@@ -20,7 +20,6 @@ function corsHeaders(origin: string): Record<string, string> {
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Max-Age": "86400",
-    // 許可オリジンごとに応答が変わるので、CDNが誤ったオリジンをキャッシュしないようにする
     Vary: "Origin",
   };
 }
@@ -35,13 +34,13 @@ export default {
     }
 
     if (url.pathname === "/health") {
-      // 設定漏れをデプロイ直後に気づけるようにする
       return Response.json(
         {
           ok: true,
           mapillaryToken: Boolean(env.MAPILLARY_TOKEN),
           db: Boolean(env.DB),
           kv: Boolean(env.SESSIONS),
+          regions: Object.keys(REGION_DEFS).length,
         },
         { headers }
       );
@@ -56,12 +55,6 @@ export default {
       return Response.json(list, { headers: { ...headers, "Cache-Control": "public, max-age=3600" } });
     }
 
-    /**
-     * 任意地点の画像を探す。用途は3つ。
-     *   下見            : /nearby-image?lat=..&lng=..
-     *   別の道へ        : /nearby-image?lat=..&lng=..&exclude=<id>&excludeSeq=<seq>&minKm=0.05
-     *   360度写真を探す : /nearby-image?lat=..&lng=..&pano=1
-     */
     if (url.pathname === "/nearby-image") {
       const q = url.searchParams;
       const lat = Number(q.get("lat"));
@@ -71,25 +64,39 @@ export default {
       }
 
       const panoOnly = q.get("pano") === "1";
+      const carOnly = q.get("car") !== "0";
       const minKmRaw = Number(q.get("minKm"));
 
-      const result = await nearestImage(
-        env.MAPILLARY_TOKEN,
-        { lat, lng },
-        {
-          panoOnly,
-          excludeId: q.get("exclude") ?? undefined,
-          excludeSequenceId: q.get("excludeSeq") ?? undefined,
-          minKm: Number.isFinite(minKmRaw) ? Math.max(0, Math.min(5, minKmRaw)) : 0,
-          // 360度に絞るときは候補が減るので、はじめから広めに探す
-          startRadius: panoOnly ? 0.02 : 0.008,
-        }
-      );
+      const result = await nearestImage(env.MAPILLARY_TOKEN, { lat, lng }, {
+        panoOnly,
+        carOnly,
+        excludeId: q.get("exclude") ?? undefined,
+        excludeSequenceId: q.get("excludeSeq") ?? undefined,
+        minKm: Number.isFinite(minKmRaw) ? Math.max(0, Math.min(5, minKmRaw)) : 0,
+      });
 
       if (!result) {
-        return Response.json({ found: false, error: "この付近には画像がありません" }, { headers });
+        return Response.json(
+          { found: false, error: "この付近に自動車から撮られた画像はありません" },
+          { headers }
+        );
       }
-      return Response.json({ found: true, ...result }, { headers });
+
+      return Response.json(
+        {
+          found: true,
+          imageId: result.imageId,
+          imageUrl: result.imageUrl,
+          isPano: result.isPano,
+          lat: result.point.lat,
+          lng: result.point.lng,
+          compassAngle: result.compassAngle ?? null,
+          transport: result.transport ?? "unknown",
+          point: result.point,
+          sequenceId: result.sequenceId,
+        },
+        { headers }
+      );
     }
 
     if (url.pathname === "/leaderboard") {
@@ -116,7 +123,6 @@ export default {
       const stub = env.GAME_ROOM.get(id);
       const resp = await stub.fetch(req);
 
-      // WebSocketのアップグレード応答はヘッダーを触らずそのまま返す
       if (resp.webSocket) return resp;
 
       const merged = new Headers(resp.headers);

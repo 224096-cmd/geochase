@@ -10,6 +10,7 @@ import type {
   PlayerScore,
   RoundRecord,
   ClientMessage,
+  StreetSpot,
 } from "./types";
 import {
   findStreetPointOnLand,
@@ -20,32 +21,30 @@ import {
   randomFallbackPoint,
   regionScaleKm,
   regionHintLevel,
+  regionLabel,
+  SearchBudget,
 } from "./mapillary";
 
 const DEFAULT_INTERVAL_MS = 30_000;
 const MIN_INTERVAL_SECONDS = 10;
-const MAX_TIME_LIMIT_SECONDS = 1800; // 30分
+const MAX_TIME_LIMIT_SECONDS = 1800;
 const CORRECT_RADIUS_KM = 0.5;
 const CHASE_ROUNDS = 8;
 const DEFAULT_CLASSIC_ROUNDS = 5;
 const MAX_CLASSIC_ROUNDS = 10;
 const TRAIL_LENGTH = 12;
-const HINT_PENALTY = 250; // ヒント1つあたりの減点
-const RETRY_PENALTY = 60; // 逃走モードで外すたびの減点
+const HINT_PENALTY = 250;
+const RETRY_PENALTY = 60;
 const GUESS_COOLDOWN_MS = 1500;
-/** 逃走判断に使う直近の回答数 */
 const PURSUIT_MEMORY = 6;
-/** 順位表に載せる人数の上限 */
 const SCOREBOARD_LIMIT = 30;
 
-/** WebSocketに紐づけるプレイヤー情報。ハイバネーションを跨いで保持される */
 interface PlayerAttachment {
   playerId: string;
   name: string | null;
   joinedAt: number;
 }
 
-/** 通常モードで1人ぶんの回答 */
 interface ClassicAnswer {
   name: string | null;
   guess: LatLng;
@@ -64,6 +63,8 @@ interface RoomState {
   imageUrl: string;
   imageId: string;
   isPano: boolean;
+  compassAngle: number | null;
+  imageMissing: boolean;
   allHints: string[];
   revealedHintCount: number;
   hintPenalty: number;
@@ -74,16 +75,14 @@ interface RoomState {
   roundEndsAt: number;
   intervalMs: number;
   region: RegionKey;
+  regionUsed: RegionKey;
   timeLimitSeconds: number;
   startedAt: number;
   lastBearing: number | null;
   moving: boolean;
   lastMoveAt: number;
-  /** このラウンドに届いた回答座標。逃走方向の決定に使う */
   roundGuesses: LatLng[];
-  /** 通常モードで、このラウンドに誰がどう答えたか */
   classicAnswers: Record<string, ClassicAnswer>;
-  /** プレイヤーごとの累計成績。順位はここから作る */
   scoreboard: Record<string, PlayerScore>;
 }
 
@@ -98,6 +97,8 @@ const DEFAULT_STATE: RoomState = {
   imageUrl: "",
   imageId: "",
   isPano: false,
+  compassAngle: null,
+  imageMissing: false,
   allHints: [],
   revealedHintCount: 0,
   hintPenalty: 0,
@@ -108,6 +109,7 @@ const DEFAULT_STATE: RoomState = {
   roundEndsAt: 0,
   intervalMs: DEFAULT_INTERVAL_MS,
   region: "japan_wide",
+  regionUsed: "japan_wide",
   timeLimitSeconds: 0,
   startedAt: 0,
   lastBearing: null,
@@ -120,7 +122,6 @@ const DEFAULT_STATE: RoomState = {
 
 export class GameRoom extends DurableObject<Env> {
   gameState: RoomState = { ...DEFAULT_STATE };
-  /** 連打防止。プレイヤーごとに独立していないと、1人が答えると全員が待たされる */
   private lastGuessAt = new Map<string, number>();
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -129,7 +130,6 @@ export class GameRoom extends DurableObject<Env> {
       const saved = await ctx.storage.get<Partial<RoomState> & { aiPosition?: LatLng | null }>("gameState");
       if (!saved) return;
       this.gameState = { ...DEFAULT_STATE, ...saved };
-      // 旧バージョンの保存データとの互換
       if (!this.gameState.runnerPosition && saved.aiPosition) this.gameState.runnerPosition = saved.aiPosition;
       this.gameState.revealedTrail = (this.gameState.revealedTrail ?? []).map((p: any, i) => ({
         lat: p.lat,
@@ -139,7 +139,7 @@ export class GameRoom extends DurableObject<Env> {
       this.gameState.roundGuesses = this.gameState.roundGuesses ?? [];
       this.gameState.classicAnswers = this.gameState.classicAnswers ?? {};
       this.gameState.scoreboard = this.gameState.scoreboard ?? {};
-      // 途中で落ちたときに「移動中」のまま固まらないようにする
+      this.gameState.regionUsed = this.gameState.regionUsed ?? this.gameState.region;
       this.gameState.moving = false;
     });
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
@@ -148,14 +148,6 @@ export class GameRoom extends DurableObject<Env> {
   private async persist() {
     await this.ctx.storage.put("gameState", this.gameState);
   }
-
-  /* ---------------------------------------------------------------- *
-   * ホスト管理
-   *
-   * いちばん先に入室した人がホスト。抜けたら次に古い人へ自動で移る。
-   * 接続情報は serializeAttachment に載せてあるので、
-   * Durable Object がハイバネーションから復帰しても引き継がれる。
-   * ---------------------------------------------------------------- */
 
   private attachmentOf(ws: WebSocket): PlayerAttachment | null {
     try {
@@ -166,7 +158,6 @@ export class GameRoom extends DurableObject<Env> {
     }
   }
 
-  /** exclude を除いた中で、いちばん先に入った人のID */
   private hostId(exclude?: WebSocket): string | null {
     let best: PlayerAttachment | null = null;
     for (const ws of this.ctx.getWebSockets()) {
@@ -186,7 +177,6 @@ export class GameRoom extends DurableObject<Env> {
     return n;
   }
 
-  /** いま接続しているプレイヤーIDの集合 */
   private onlineIds(exclude?: WebSocket): Set<string> {
     const set = new Set<string>();
     for (const ws of this.ctx.getWebSockets()) {
@@ -197,29 +187,52 @@ export class GameRoom extends DurableObject<Env> {
     return set;
   }
 
-  /** ホストでなければ true を返し、本人に理由を伝える */
   private denyIfNotHost(ws: WebSocket, action: string): boolean {
     const host = this.hostId();
-    if (!host) return false; // 誰もいなければ制限しない
+    if (!host) return false;
     const me = this.attachmentOf(ws)?.playerId;
     if (me === host) return false;
     try {
       ws.send(JSON.stringify({ type: "notice", message: `ホストだけが${action}できます` }));
-    } catch {
-      /* 送信できなくても進行に影響はない */
-    }
+    } catch {}
     return true;
   }
 
-  /** 探索前に「移動中」を配信して、待ち時間を無反応にしない */
   private announceMoving(moving: boolean) {
     this.gameState.moving = moving;
     this.broadcast(this.publicState());
   }
 
-  /* ---------------------------------------------------------------- *
-   * 成績（プレイヤーごと）
-   * ---------------------------------------------------------------- */
+  private notice(message: string) {
+    this.broadcast({ type: "notice", message });
+  }
+
+  // 画像なしのラウンドを作らない。見つからなければ広いエリアへ逃がし、
+  // それでも駄目なときだけ imageMissing を立てて理由を伝える
+  private async resolveSpot(region: RegionKey, avoid: LatLng[]): Promise<{ spot: StreetSpot | null; region: RegionKey }> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const budget = new SearchBudget();
+      const found = await findStreetPointOnLand(this.env.MAPILLARY_TOKEN, region, this.env.SESSIONS, avoid, budget);
+      if (found?.spot?.imageId) {
+        if (found.region !== region) {
+          this.notice(
+            `${regionLabel(region)}で自動車の撮影が見つからなかったため、${regionLabel(found.region)}まで範囲を広げました`
+          );
+        }
+        return { spot: found.spot, region: found.region };
+      }
+    }
+    return { spot: null, region };
+  }
+
+  private applySpot(spot: StreetSpot | null, position: LatLng) {
+    this.gameState.runnerPosition = position;
+    this.gameState.imageUrl = spot?.imageUrl ?? "";
+    this.gameState.imageId = spot?.imageId ?? "";
+    this.gameState.isPano = spot?.isPano ?? false;
+    this.gameState.compassAngle = spot?.compassAngle ?? null;
+    this.gameState.imageMissing = !spot?.imageId;
+  }
 
   private ensurePlayer(id: string, name?: string | null): PlayerScore {
     const existing = this.gameState.scoreboard[id];
@@ -240,7 +253,6 @@ export class GameRoom extends DurableObject<Env> {
     return created;
   }
 
-  /** 距離から出した点をその人だけに加算する */
   private awardScore(id: string, name: string | null | undefined, score: number, distanceKm: number | null) {
     const p = this.ensurePlayer(id, name);
     p.total += score;
@@ -249,18 +261,15 @@ export class GameRoom extends DurableObject<Env> {
     if (distanceKm !== null && (p.bestKm === null || distanceKm < p.bestKm)) p.bestKm = distanceKm;
   }
 
-  /** 外れた回答。点は入らないが「どこまで近づけたか」は残す */
   private noteAttempt(id: string, name: string | null | undefined, distanceKm: number) {
     const p = this.ensurePlayer(id, name);
     if (p.bestKm === null || distanceKm < p.bestKm) p.bestKm = distanceKm;
   }
 
-  /** 新しいラウンドに入るとき、直近ラウンドの点だけ消す（累計は残す） */
   private resetRoundScores() {
     for (const p of Object.values(this.gameState.scoreboard)) p.lastRound = 0;
   }
 
-  /** 累計スコア順。同点なら最短距離が近い人を上に */
   private scoreboardList(exclude?: WebSocket): PlayerScore[] {
     const online = this.onlineIds(exclude);
     return Object.values(this.gameState.scoreboard)
@@ -274,16 +283,11 @@ export class GameRoom extends DurableObject<Env> {
       .slice(0, SCOREBOARD_LIMIT);
   }
 
-  /** ルームの代表スコア = 最高得点者の累計 */
   private roomTopScore(): number {
     let top = 0;
     for (const p of Object.values(this.gameState.scoreboard)) if (p.total > top) top = p.total;
     return top;
   }
-
-  /* ---------------------------------------------------------------- *
-   * HTTP
-   * ---------------------------------------------------------------- */
 
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
@@ -295,14 +299,11 @@ export class GameRoom extends DurableObject<Env> {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       this.ctx.acceptWebSocket(server);
-      // 誰がいつ入ったかを覚えておく。ホストの決定に使う
       server.serializeAttachment({ playerId, name, joinedAt: Date.now() } satisfies PlayerAttachment);
 
-      // 回答前でも順位表に名前が出るよう、入室時点で登録しておく
       this.ensurePlayer(playerId, name);
 
       server.send(JSON.stringify(this.publicState()));
-      // 新しい人が入ったので、全員に人数とホストを配り直す
       this.broadcast(this.publicState());
       return new Response(null, { status: 101, webSocket: client });
     }
@@ -321,9 +322,7 @@ export class GameRoom extends DurableObject<Env> {
       let playerId: string | undefined;
       try {
         playerId = ((await req.json()) as { playerId?: string })?.playerId;
-      } catch {
-        /* ボディなし */
-      }
+      } catch {}
       const denied = this.rejectIfNotHost(playerId, "停止");
       if (denied) return denied;
 
@@ -338,7 +337,6 @@ export class GameRoom extends DurableObject<Env> {
     return new Response("not found", { status: 404 });
   }
 
-  /** ホスト以外の操作を弾く。誰も接続していないときは誰でも操作できる */
   private rejectIfNotHost(playerId: string | undefined, action: string): Response | null {
     const host = this.hostId();
     if (!host) return null;
@@ -369,15 +367,9 @@ export class GameRoom extends DurableObject<Env> {
       if (typeof body?.rounds === "number" && Number.isFinite(body.rounds)) {
         result.rounds = Math.max(1, Math.min(MAX_CLASSIC_ROUNDS, Math.round(body.rounds)));
       }
-    } catch {
-      // ボディなし/不正なら既定値
-    }
+    } catch {}
     return result;
   }
-
-  /* ---------------------------------------------------------------- *
-   * WebSocket（ハイバネーションAPIのハンドラ）
-   * ---------------------------------------------------------------- */
 
   async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer) {
     if (typeof raw !== "string") return;
@@ -392,9 +384,7 @@ export class GameRoom extends DurableObject<Env> {
 
     switch (msg.type) {
       case "guess": {
-        // 接続そのものに紐づくIDを優先する。
-        // クライアント任せにすると全員が同じIDを送ってきて、
-        // 連打防止が全員で共有されてしまう（実際にその不具合があった）
+        // 接続に紐づくIDを優先する。クライアント任せだと連打防止が全員で共有される
         const id = attachment?.playerId ?? msg.userId ?? "anon";
         const name = msg.playerName ?? attachment?.name ?? null;
         await this.handleGuess(ws, msg.lat, msg.lng, id, name);
@@ -402,13 +392,10 @@ export class GameRoom extends DurableObject<Env> {
       }
 
       case "hint":
-        // ヒントは全員に公開され、減点も全員に等しくかかる。
-        // 順位は同じ条件で競うことになるので、誰が開いてもよい
         await this.revealNextHint();
         break;
 
       case "next":
-        // 次のラウンドへ進めるのはホストだけ
         if (this.denyIfNotHost(ws, "次のラウンドへ進む")) return;
         await this.startNextClassicRound();
         break;
@@ -433,24 +420,15 @@ export class GameRoom extends DurableObject<Env> {
   webSocketClose(ws: WebSocket, code: number, reason: string) {
     try {
       ws.close(code === 1006 ? 1000 : code, reason);
-    } catch {
-      /* 既に閉じている */
-    }
-    // ホストが抜けたら次の人へ引き継ぐ。抜けた本人は数に入れない
+    } catch {}
     this.broadcast(this.publicState(ws), ws);
   }
 
   webSocketError(ws: WebSocket) {
     try {
       ws.close(1011, "error");
-    } catch {
-      /* noop */
-    }
+    } catch {}
   }
-
-  /* ---------------------------------------------------------------- *
-   * 回答処理
-   * ---------------------------------------------------------------- */
 
   async handleGuess(ws: WebSocket, lat: number, lng: number, userId: string, playerName: string | null) {
     if (this.gameState.status !== "running" || !this.gameState.runnerPosition) return;
@@ -465,7 +443,6 @@ export class GameRoom extends DurableObject<Env> {
     const target = this.gameState.runnerPosition;
     const distanceKm = haversineKm(guess, target);
 
-    // 「どこから追われているか」を覚えて、次の移動方向に反映する
     this.gameState.roundGuesses = [...this.gameState.roundGuesses, guess].slice(-PURSUIT_MEMORY);
 
     if (this.gameState.mode === "classic") {
@@ -473,8 +450,6 @@ export class GameRoom extends DurableObject<Env> {
       return;
     }
 
-    /* --- 逃走モード ---
-       見つけた人だけに点が入る。外した人も「最短距離」だけ記録しておく */
     this.gameState.attempts += 1;
     const correct = distanceKm <= CORRECT_RADIUS_KM;
 
@@ -488,7 +463,6 @@ export class GameRoom extends DurableObject<Env> {
           correct: false,
           score: 0,
           proximity: proximityBand(distanceKm),
-          // 25km以内まで近づいたら方角も教える
           bearing: distanceKm <= 25 ? Math.round(bearingDeg(guess, target)) : null,
           roundOver: false,
         })
@@ -529,12 +503,6 @@ export class GameRoom extends DurableObject<Env> {
     await this.advanceChaseRound();
   }
 
-  /**
-   * 通常モードの回答。
-   *
-   * 点数は回答者ごとに独立して計算する（同じ地点でも、置いたピンが近い人ほど高い）。
-   * 全員が答えるか時間切れになるまでラウンドは終わらない。
-   */
   private async handleClassicGuess(
     ws: WebSocket,
     userId: string,
@@ -542,10 +510,9 @@ export class GameRoom extends DurableObject<Env> {
     guess: LatLng,
     distanceKm: number
   ) {
-    // 1人1回まで。答え直しは認めない
     if (this.gameState.classicAnswers[userId]) return;
 
-    const score = classicScore(distanceKm, regionScaleKm(this.gameState.region), this.gameState.hintPenalty);
+    const score = classicScore(distanceKm, regionScaleKm(this.gameState.regionUsed), this.gameState.hintPenalty);
     this.gameState.classicAnswers[userId] = { name: playerName, guess, distanceKm, score };
     this.ensurePlayer(userId, playerName);
     await this.persist();
@@ -556,7 +523,6 @@ export class GameRoom extends DurableObject<Env> {
     const total = this.playerCount();
 
     if (answered < total) {
-      // 本人にだけ「受理した」と返す。正解座標はまだ伏せる
       ws.send(
         JSON.stringify({
           type: "result",
@@ -576,20 +542,14 @@ export class GameRoom extends DurableObject<Env> {
     await this.settleClassicRound(false);
   }
 
-  /**
-   * 通常モード1ラウンドの決着。
-   * 回答した全員に、それぞれの距離で計算した点を配る。
-   */
   private async settleClassicRound(timeUp: boolean) {
     const target = this.gameState.runnerPosition!;
     const entries = Object.entries(this.gameState.classicAnswers);
 
-    // 回答者それぞれに、その人の距離から出した点を加算する
     for (const [id, ans] of entries) {
       this.awardScore(id, ans.name, ans.score, ans.distanceKm);
     }
 
-    // 記録パネル用に「そのラウンドでいちばん近かった回答」を残す
     let best: ClassicAnswer | null = null;
     for (const [, ans] of entries) {
       if (!best || ans.distanceKm < best.distanceKm) best = ans;
@@ -613,7 +573,6 @@ export class GameRoom extends DurableObject<Env> {
     ].slice(-TRAIL_LENGTH);
     this.gameState.status = this.gameState.round >= this.gameState.maxRounds ? "finished" : "reveal";
 
-    // 回答済みなのに制限時間アラームが後から発火して結果を上書きするのを防ぐ
     await this.ctx.storage.deleteAlarm();
     await this.persist();
 
@@ -633,10 +592,6 @@ export class GameRoom extends DurableObject<Env> {
     if (this.gameState.status === "finished") await this.saveFinalScore();
   }
 
-  /* ---------------------------------------------------------------- *
-   * ヒント
-   * ---------------------------------------------------------------- */
-
   async revealNextHint() {
     if (this.gameState.status !== "running") return;
     if (this.gameState.revealedHintCount >= this.gameState.allHints.length) return;
@@ -647,21 +602,17 @@ export class GameRoom extends DurableObject<Env> {
     this.broadcast(this.publicState());
   }
 
-  /* ---------------------------------------------------------------- *
-   * ゲーム進行
-   * ---------------------------------------------------------------- */
-
   async startClassicGame(region: RegionKey, timeLimitSeconds: number, rounds: number) {
     await this.ctx.storage.deleteAlarm();
     this.gameState = {
       ...DEFAULT_STATE,
       mode: "classic",
       region,
+      regionUsed: region,
       timeLimitSeconds,
       maxRounds: rounds,
       round: 0,
       startedAt: Date.now(),
-      // 新しいゲームなので順位もリセットする
       scoreboard: {},
     };
     await this.beginClassicRound();
@@ -675,14 +626,9 @@ export class GameRoom extends DurableObject<Env> {
   private async beginClassicRound() {
     this.announceMoving(true);
 
-    const spot = await findStreetPointOnLand(
-      this.env.MAPILLARY_TOKEN,
-      this.gameState.region,
-      this.env.SESSIONS,
-      this.gameState.trail
-    );
+    const { spot, region: used } = await this.resolveSpot(this.gameState.region, this.gameState.trail);
     const position = spot?.point ?? randomFallbackPoint(this.gameState.region);
-    const hints = await buildPlaceHints(position, this.env.SESSIONS, regionHintLevel(this.gameState.region));
+    const hints = await buildPlaceHints(position, this.env.SESSIONS, regionHintLevel(used));
     const now = Date.now();
 
     this.resetRoundScores();
@@ -691,11 +637,8 @@ export class GameRoom extends DurableObject<Env> {
       ...this.gameState,
       status: "running",
       round: this.gameState.round + 1,
-      runnerPosition: position,
+      regionUsed: used,
       trail: [...this.gameState.trail, position].slice(-TRAIL_LENGTH),
-      imageUrl: spot?.imageUrl ?? "",
-      imageId: spot?.imageId ?? "",
-      isPano: spot?.isPano ?? false,
       allHints: hints,
       revealedHintCount: 0,
       hintPenalty: 0,
@@ -707,6 +650,11 @@ export class GameRoom extends DurableObject<Env> {
       moving: false,
       lastMoveAt: now,
     };
+    this.applySpot(spot, position);
+
+    if (this.gameState.imageMissing) {
+      this.notice("この地点の写真が見つかりませんでした。ヒントと地図で推理してください");
+    }
 
     await this.persist();
     this.broadcast(this.publicState());
@@ -719,12 +667,20 @@ export class GameRoom extends DurableObject<Env> {
   async startChaseGame(region: RegionKey, intervalMs: number) {
     await this.ctx.storage.deleteAlarm();
 
-    this.gameState = { ...DEFAULT_STATE, mode: "chase", region, intervalMs, startedAt: Date.now(), scoreboard: {} };
+    this.gameState = {
+      ...DEFAULT_STATE,
+      mode: "chase",
+      region,
+      regionUsed: region,
+      intervalMs,
+      startedAt: Date.now(),
+      scoreboard: {},
+    };
     this.announceMoving(true);
 
-    const spot = await findStreetPointOnLand(this.env.MAPILLARY_TOKEN, region, this.env.SESSIONS);
+    const { spot, region: used } = await this.resolveSpot(region, []);
     const position = spot?.point ?? randomFallbackPoint(region);
-    const hints = await buildPlaceHints(position, this.env.SESSIONS, regionHintLevel(region));
+    const hints = await buildPlaceHints(position, this.env.SESSIONS, regionHintLevel(used));
     const now = Date.now();
 
     this.gameState = {
@@ -733,20 +689,22 @@ export class GameRoom extends DurableObject<Env> {
       status: "running",
       round: 1,
       maxRounds: CHASE_ROUNDS,
-      runnerPosition: position,
       trail: [position],
-      imageUrl: spot?.imageUrl ?? "",
-      imageId: spot?.imageId ?? "",
-      isPano: spot?.isPano ?? false,
       allHints: hints,
       nextUpdateAt: now + intervalMs,
       intervalMs,
       region,
+      regionUsed: used,
       startedAt: now,
       moving: false,
       lastMoveAt: now,
       scoreboard: {},
     };
+    this.applySpot(spot, position);
+
+    if (this.gameState.imageMissing) {
+      this.notice("この地点の写真が見つかりませんでした。ヒントと地図で推理してください");
+    }
 
     await this.persist();
     this.broadcast(this.publicState());
@@ -773,12 +731,10 @@ export class GameRoom extends DurableObject<Env> {
     if (this.gameState.moving) return;
 
     if (this.gameState.mode === "classic") {
-      // 時間切れ。まだ答えていない人がいても、その時点の回答で決着させる
       await this.settleClassicRound(true);
       return;
     }
 
-    // 時間内に見つけられなかったので取り逃がし扱い
     if (this.gameState.runnerPosition) {
       this.gameState.history = [
         ...this.gameState.history,
@@ -815,7 +771,7 @@ export class GameRoom extends DurableObject<Env> {
       return;
     }
 
-    // 探索は最悪で十数秒かかる。先に「移動中」と軌跡の追加を配信しておく
+    // 探索は十数秒かかることがある。先に「移動中」を配信して無反応にしない
     this.gameState.revealedTrail = [
       ...this.gameState.revealedTrail,
       { ...previous, round: previousRound },
@@ -832,18 +788,21 @@ export class GameRoom extends DurableObject<Env> {
       this.gameState.roundGuesses,
       this.env.SESSIONS
     );
-    const position = moved?.point ?? previous;
-    const hints = await buildPlaceHints(position, this.env.SESSIONS, regionHintLevel(this.gameState.region));
+
+    const fallback = moved ? null : await this.resolveSpot(this.gameState.region, this.gameState.trail);
+    const spot = moved?.spot ?? fallback?.spot ?? null;
+    const used = moved?.region ?? fallback?.region ?? this.gameState.regionUsed;
+    const position = spot?.point ?? previous;
+
+    const hints = await buildPlaceHints(position, this.env.SESSIONS, regionHintLevel(used));
 
     this.resetRoundScores();
 
     this.gameState.round += 1;
-    this.gameState.runnerPosition = position;
+    this.gameState.regionUsed = used;
     this.gameState.lastBearing = moved?.bearing ?? this.gameState.lastBearing;
     this.gameState.trail = [...this.gameState.trail, position].slice(-TRAIL_LENGTH);
-    this.gameState.imageUrl = moved?.imageUrl || this.gameState.imageUrl;
-    this.gameState.imageId = moved?.imageId || this.gameState.imageId;
-    this.gameState.isPano = moved?.isPano ?? this.gameState.isPano;
+    this.applySpot(spot, position);
     this.gameState.allHints = hints;
     this.gameState.revealedHintCount = 0;
     this.gameState.hintPenalty = 0;
@@ -854,16 +813,15 @@ export class GameRoom extends DurableObject<Env> {
     this.gameState.lastMoveAt = Date.now();
     this.gameState.nextUpdateAt = this.gameState.lastMoveAt + this.gameState.intervalMs;
 
+    if (this.gameState.imageMissing) {
+      this.notice("移動先の写真が見つかりませんでした。ヒントと地図で推理してください");
+    }
+
     await this.persist();
     this.broadcast(this.publicState());
     await this.ctx.storage.setAlarm(this.gameState.nextUpdateAt);
   }
 
-  /* ---------------------------------------------------------------- *
-   * 永続化（D1）
-   * ---------------------------------------------------------------- */
-
-  /** 待たずに投げる。失敗してもゲーム進行は止めない */
   private recordGuess(
     userId: string,
     playerName: string | null | undefined,
@@ -883,7 +841,7 @@ export class GameRoom extends DurableObject<Env> {
         userId,
         playerName ?? null,
         this.gameState.mode,
-        this.gameState.region,
+        this.gameState.regionUsed,
         guess.lat,
         guess.lng,
         distanceKm,
@@ -917,10 +875,6 @@ export class GameRoom extends DurableObject<Env> {
     }
   }
 
-  /* ---------------------------------------------------------------- *
-   * 配信・状態
-   * ---------------------------------------------------------------- */
-
   broadcast(msg: unknown, exclude?: WebSocket) {
     const data = JSON.stringify(msg);
     for (const ws of this.ctx.getWebSockets()) {
@@ -930,9 +884,7 @@ export class GameRoom extends DurableObject<Env> {
       } catch {
         try {
           ws.close(1011, "send failed");
-        } catch {
-          /* noop */
-        }
+        } catch {}
       }
     }
   }
@@ -948,7 +900,10 @@ export class GameRoom extends DurableObject<Env> {
       imageId: s.imageId,
       imageUrl: s.imageUrl,
       isPano: s.isPano,
+      compassAngle: s.compassAngle,
+      imageMissing: s.imageMissing,
       region: s.region,
+      regionUsed: s.regionUsed,
       revealedHints: s.allHints.slice(0, s.revealedHintCount),
       hintsAvailable: Math.max(0, s.allHints.length - s.revealedHintCount),
       hintPenalty: s.hintPenalty,
@@ -971,16 +926,11 @@ export class GameRoom extends DurableObject<Env> {
   }
 }
 
-/* ------------------------------------------------------------------ *
- * スコア・判定ヘルパー
- * ------------------------------------------------------------------ */
-
 function roundTo(value: number, digits: number) {
   const f = 10 ** digits;
   return Math.round(value * f) / f;
 }
 
-/** GeoGuessr風の指数減衰スコア。エリアが狭いほど厳しく採点される */
 function classicScore(distanceKm: number, scaleKm: number, hintPenalty: number): number {
   if (distanceKm <= 0.15) return Math.max(0, 5000 - hintPenalty);
   const raw = 5000 * Math.exp((-10 * distanceKm) / scaleKm);

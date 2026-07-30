@@ -1,14 +1,3 @@
-/* ==========================================================================
-   GeoChase — 追跡計器をモチーフにした暗色UI
-
-   レイアウト方針:
-   - 高さは body > #root > .app > .layout > .stage の flex チェーンで通す。
-   - 高さは 100dvh。flexなので伸縮しても各要素の比率が保たれ、画面下に隙間が出ない。
-   - 計器バーは常時表示、結果バナーは stage の上に重ねる。
-   - 広告バーは body の flex 子。高さは「中身の実寸」に合わせ、
-     配信が無いときは main.tsx が .is-empty を付けて枠ごと畳む。
-   ========================================================================== */
-
 :root {
   --ink: #070c0b;
   --surface: #0f1815;
@@ -29,10 +18,13 @@
 
   --radius: 12px;
   --radius-sm: 8px;
-  /* 実測値を main.tsx が上書きする。初期値は0で、余白を先に確保しない */
+
   --ad-h: 0px;
-  --pip: 78px; /* スマホで控えの画面を出す正方形の一辺 */
+  --pip: 78px;
   --tap: 44px;
+
+  --split-street: 0.56;
+  --split-map: 0.44;
 }
 
 * {
@@ -46,7 +38,7 @@ html {
 body {
   margin: 0;
   height: 100vh;
-  /* dvh は実際に見えている高さ。svh だとツールバーが隠れたとき下に隙間が残る */
+  /* dvh は実際に見えている高さ。svh だと下に隙間が残る */
   height: 100dvh;
   display: flex;
   flex-direction: column;
@@ -56,6 +48,18 @@ body {
   font-family: var(--font-ui);
   -webkit-text-size-adjust: 100%;
   overscroll-behavior: none;
+}
+
+/* 仕切りのドラッグ中は地図やテキストを選択させない */
+body.is-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.is-resizing iframe,
+body.is-resizing .map-canvas,
+body.is-resizing .street-canvas {
+  pointer-events: none;
 }
 
 #root {
@@ -94,8 +98,6 @@ code {
   white-space: nowrap;
 }
 
-/* ---------- 骨格 ---------- */
-
 .app {
   flex: 1 1 auto;
   min-height: 0;
@@ -130,8 +132,6 @@ code {
   position: relative;
   background: var(--surface);
 }
-
-/* ---------- ヘッダー ---------- */
 
 .topbar {
   display: flex;
@@ -208,8 +208,6 @@ code {
   flex-shrink: 0;
 }
 
-/* ---------- ボタン ---------- */
-
 .primary-btn {
   background: var(--brand);
   color: #fff;
@@ -249,8 +247,6 @@ code {
 .ghost-btn:disabled { color: #5d7871; cursor: not-allowed; }
 
 .wide { width: 100%; }
-
-/* ---------- 計器バー（常時表示・高さ固定） ---------- */
 
 .readout {
   display: flex;
@@ -295,7 +291,6 @@ code {
 .readout-value.is-empty { color: #4a635b; }
 .readout-sub { font-size: 12px; color: var(--muted); }
 
-/* 移動中はカウントダウンの代わりにスピナー＋文字を出す */
 .readout-moving {
   display: inline-flex;
   align-items: center;
@@ -321,12 +316,10 @@ code {
 .readout[data-urgency="critical"] .readout-timer .readout-value { color: var(--hot); }
 .readout[data-urgency="critical"] .readout-bar { background: var(--hot); }
 
-/* ---------- ステージ（映像＋地図） ---------- */
-
+/* Leafletは内部で z-index 400〜800 を使う。ここで閉じ込めないと
+   結果バナーやPC広告がタイルの後ろに回り込む */
 .pane {
   position: relative;
-  /* Leafletは内部で z-index 400〜800 を使う。ここで stacking context を作って
-     閉じ込めないと、結果バナーやPC広告がタイルの後ろに回り込む */
   z-index: 0;
   min-height: 0;
   border-radius: var(--radius);
@@ -335,7 +328,6 @@ code {
   background: #000;
 }
 
-/* 結果は stage に重ねる。流し込むとレイアウトが動いて画面が飛ぶため */
 .result {
   position: absolute;
   top: 12px;
@@ -365,7 +357,6 @@ code {
 .result.is-correct { background: #12362c; color: var(--signal); border: 1px solid #1f5a49; }
 .result.is-miss { background: #33201d; color: #f3b0aa; border: 1px solid #5a2f2a; }
 
-/* 次の地点を探している間の全面表示。何が起きているか必ず分かるようにする */
 .stage-overlay {
   position: absolute;
   inset: 0;
@@ -384,7 +375,6 @@ code {
 .stage-overlay strong { font-size: 15px; }
 .stage-overlay span { font-size: 12px; color: var(--muted); max-width: 30ch; line-height: 1.6; }
 
-/* 小窓（PIP） */
 .pip-label {
   position: absolute;
   top: 6px;
@@ -402,13 +392,11 @@ code {
   pointer-events: none;
 }
 
-/* ---------- ペイン内の操作（各画面の端に固定） ---------- */
-
+/* 現地／下見タブは右下。左上は再生系、右上は視点操作で埋まっている */
 .pane-tabs {
   position: absolute;
-  top: 8px;
-  left: 8px;
-  /* 平面写真の注意書き(z-index:7)より前に置いて、必ず押せるようにする */
+  right: 8px;
+  bottom: 8px;
   z-index: 9;
   display: flex;
   gap: 4px;
@@ -431,8 +419,6 @@ code {
   color: #fff;
 }
 
-/* ---------- ストリート画像 ---------- */
-
 .street-wrap {
   position: relative;
   width: 100%;
@@ -448,6 +434,19 @@ code {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.street-credit {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  z-index: 6;
+  background: rgb(7 12 11 / 80%);
+  color: var(--muted);
+  font-size: 9px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  pointer-events: none;
 }
 
 .street-message {
@@ -486,7 +485,6 @@ code {
   display: inline-block;
 }
 
-/* 画像タイルを取りに行っている間、上端を流れる細いバー */
 .street-progress {
   position: absolute;
   top: 0;
@@ -501,7 +499,7 @@ code {
 
 .street-notice {
   position: absolute;
-  top: 10px;
+  top: 52px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 9;
@@ -515,61 +513,23 @@ code {
   white-space: nowrap;
 }
 
-/* 平面写真のとき「なぜ振り向けないか」を説明し、360°写真への逃げ道を出す */
-.street-flat-note {
+/* 順再生・逆再生・再生の長さ・別の道へ は左上にまとめる */
+.street-playback {
   position: absolute;
   left: 8px;
-  /* 「現地/下見」タブが出ていても重ならないよう、常に1段下に置く */
-  top: 46px;
-  z-index: 7;
+  top: 8px;
+  z-index: 6;
   display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
   align-items: center;
-  gap: 8px;
-  max-width: calc(100% - 100px);
-  background: rgb(7 12 11 / 90%);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 5px 6px 5px 12px;
-  font-size: 11px;
-  color: var(--muted);
+  max-width: calc(100% - 120px);
 }
 
-.street-flat-note span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.street-flat-note button {
-  background: var(--brand);
-  color: #fff;
-  border: none;
-  border-radius: 999px;
-  padding: 5px 10px;
-  font-size: 11px;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.street-flat-note button:disabled { opacity: 0.6; cursor: not-allowed; }
-
-/* 映像側の操作は右上に縦積み。看板を読むためのズームを最優先で置く */
 .street-controls {
   position: absolute;
   right: 8px;
   top: 8px;
-  z-index: 5;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  align-items: flex-end;
-}
-
-/* 再生系は右下。地図側のボタン（左下）と重ならない */
-.street-playback {
-  position: absolute;
-  right: 8px;
-  bottom: 8px;
   z-index: 5;
   display: flex;
   flex-direction: column;
@@ -604,7 +564,20 @@ code {
 .street-btn.is-on { background: var(--brand); border-color: var(--brand); color: #fff; }
 .street-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
-/* ---------- 地図 ---------- */
+.street-select { display: inline-flex; }
+
+.street-select select {
+  background: rgb(7 12 11 / 88%);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  height: 32px;
+  padding: 0 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.street-select select option { background: var(--surface-2); color: var(--text); }
 
 .map-wrap { position: relative; width: 100%; height: 100%; }
 .map-canvas { width: 100%; height: 100%; }
@@ -629,10 +602,8 @@ code {
   line-height: 32px !important;
 }
 
-/* MapLibreのキャンバスがLeafletのペイン内で正しく敷かれるようにする */
 .leaflet-maplibre-gl-pane canvas { outline: none; }
 
-/* 軌跡ピンの吹き出し */
 .trail-tip {
   background: rgb(7 12 11 / 92%) !important;
   border: 1px solid var(--line) !important;
@@ -645,7 +616,6 @@ code {
 .trail-tip::before { display: none !important; }
 .trail-tip.is-latest { color: #ffd77a !important; border-color: var(--warn) !important; }
 
-/* 小窓のときは地図の操作系を丸ごと隠す */
 .map-wrap.is-compact .leaflet-control-container,
 .map-wrap.is-compact .map-controls,
 .map-wrap.is-compact .map-coords,
@@ -656,7 +626,6 @@ code {
   display: none;
 }
 
-/* 地図側の操作は左下に固める（小窓は右下なので重ならない） */
 .map-controls {
   position: absolute;
   left: 8px;
@@ -684,7 +653,6 @@ code {
 .map-btn.is-accent { border-color: var(--brand); color: var(--signal); }
 .map-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* ピンを置いた場所の座標。操作ボタンの1段上に置く */
 .map-coords {
   position: absolute;
   left: 8px;
@@ -713,7 +681,6 @@ code {
 
 .map-coords-copy { font-size: 9px; color: var(--signal); }
 
-/* タイル取得中。航空写真は重いので必ず出す */
 .map-loading {
   position: absolute;
   top: 8px;
@@ -733,7 +700,6 @@ code {
 
 .map-loading .street-spinner { width: 14px; height: 14px; }
 
-/* 出所明示。常時の帰属表示に加えて全文を開けるようにする */
 .map-credit-btn {
   position: absolute;
   right: 8px;
@@ -768,7 +734,6 @@ code {
 .map-credit-panel p { margin: 0 0 7px; word-break: break-word; }
 .map-credit-panel p:last-child { margin-bottom: 0; }
 
-/* 日本国外の高ズームでは航空写真が無いので、その理由を伝える */
 .map-range-note {
   position: absolute;
   top: 8px;
@@ -798,8 +763,6 @@ code {
   color: var(--muted);
   pointer-events: none;
 }
-
-/* ---------- サイドパネル ---------- */
 
 .panel-tabs {
   display: flex;
@@ -848,6 +811,7 @@ code {
   color: var(--muted);
 }
 
+/* 16px未満だとiOSで入力時にズームする。selectは15pxまで */
 .field select,
 .field input {
   background: var(--surface-2);
@@ -856,7 +820,7 @@ code {
   border-radius: var(--radius-sm);
   padding: 10px;
   min-height: var(--tap);
-  font-size: 15px; /* 16px未満だとiOSで入力時にズームするため、selectは15pxまで */
+  font-size: 15px;
 }
 
 .field select:disabled { opacity: 0.5; }
@@ -867,6 +831,7 @@ code {
 .room-join input { flex: 1; min-width: 0; font-family: var(--font-data); }
 
 .note { margin: 0; font-size: 12px; line-height: 1.6; color: #6f8a82; }
+.note.is-warn { color: #f3b0aa; }
 
 .hint-list {
   margin: 0;
@@ -919,8 +884,6 @@ code {
   font-weight: 600;
 }
 
-/* ---------- 操作バー ---------- */
-
 .actionbar {
   display: flex;
   gap: 8px;
@@ -928,8 +891,6 @@ code {
   border-top: 1px solid var(--line-soft);
   background: var(--surface);
 }
-
-/* ---------- 補助 ---------- */
 
 .install-wrap { position: relative; }
 
@@ -980,371 +941,6 @@ code {
   font-size: 13px;
 }
 
-/* ---------- 広告枠 ----------
-   高さは予約しない（中身の実寸に合わせる）。
-   配信が無ければ main.tsx の trackAdSlot() が .is-empty を付け、枠ごと畳む。 */
-
-.ad-bar {
-  flex: 0 0 auto;
-  min-height: 0;
-  height: auto;
-  padding: 0;
-  background: var(--ink);
-  border-top: 1px solid var(--line-soft);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 0;
-  overflow: hidden;
-}
-
-/* 広告が入っているときだけ、iPhoneのホームバーぶんを足す */
-.ad-bar:not(.is-empty) {
-  padding-bottom: env(safe-area-inset-bottom);
-}
-
-/* 広告が配信されなかったとき。高さ0にして枠と境界線を消す。
-   display:none にすると、あとから広告が入っても高さを測れなくなるので使わない */
-.ad-bar.is-empty {
-  height: 0;
-  min-height: 0;
-  padding: 0;
-  border-top: none;
-}
-
-#ad-sp {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 0;
-}
-
-#ad-sp img,
-#ad-sp iframe {
-  display: block; /* inline要素の行間で数pxの隙間が出るのを防ぐ */
-}
-
-/* PCレクタングルは既定で非表示。fixedにするので flow には影響しない */
-#ad-pc-rect {
-  display: none;
-}
-
-/* 配信が無かったときは枠ごと畳む（空の黒い箱を残さない）。
-   display:none にしないのは、あとから広告が入ったときに
-   高さを測り直せなくなるため */
-#ad-pc-rect.is-empty {
-  min-height: 0;
-  border: none;
-  background: none;
-}
-
-/* ==========================================================================
-   〜899px: 映像と地図を切り替え表示（小窓は左下固定）
-   ========================================================================== */
-
-@media (max-width: 899px) {
-  /* 主画面はステージいっぱい。控えの画面は下の帯に正方形で置く。
-     控えを .layout 基準で配置したいので、.stage の position:relative を外す */
-  .stage {
-    position: static;
-    display: flex;
-    padding: 4px;
-  }
-
-  .stage[data-focus="street"] .pane-street,
-  .stage[data-focus="map"] .pane-map {
-    flex: 1 1 auto;
-    min-width: 0;
-  }
-
-  .stage[data-focus="street"] .pane-map,
-  .stage[data-focus="map"] .pane-street {
-    position: absolute;
-    left: 4px;
-    bottom: 4px;
-    width: var(--pip);
-    height: var(--pip);
-    z-index: 5;
-    cursor: pointer;
-  }
-
-  /* 帯側の中身は触らせない（誤タップで地図にピンが立つのを防ぐ） */
-  .stage[data-focus="street"] .pane-map > *,
-  .stage[data-focus="map"] .pane-street > * {
-    pointer-events: none;
-  }
-
-  /* 下の帯: 左の正方形ぶんを空けて、タブと回答ボタンを縦に並べる */
-  .sidebar {
-    min-height: calc(var(--pip) + 8px);
-    padding: 4px 4px 4px calc(var(--pip) + 10px);
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 5px;
-    border-top: none;
-  }
-
-  .panel-tabs { padding: 0; border-top: none; }
-  .panel-tabs button { min-height: 32px; padding: 5px 4px; }
-  .actionbar { padding: 0; border-top: none; }
-  .actionbar .primary-btn { min-height: 42px; }
-
-  .topbar { min-height: 44px; padding: 4px 10px; }
-  .readout-cell { padding: 5px 10px 7px; }
-  .readout-value { font-size: 17px; }
-
-  /* 再生ボタンは横並び＋折り返し。PIPと重ならない幅に収める */
-  .street-playback {
-    flex-direction: row;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-    bottom: 6px;
-    right: 6px;
-    max-width: calc(100% - var(--pip) - 24px);
-  }
-  .street-controls { top: 6px; right: 6px; }
-
-  /* 座標はPIPの上に置く。広告バーとも操作ボタンとも重ならない */
-  .map-coords { bottom: 62px; padding: 5px 9px; }
-  .map-coords-value { font-size: 12px; }
-
-  .toast { bottom: calc(var(--ad-h) + 110px); }
-
-  /* パネルはタブ帯の真上に開く。タブ帯の高さは変わらないので画面が動かない */
-  .app:not([data-panel="none"]) .panel-body {
-    display: block;
-    position: absolute;
-    bottom: 100%;
-    left: 0;
-    right: 0;
-    z-index: 150;
-    max-height: 58svh;
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-    background: var(--surface);
-    border-top: 1px solid var(--line);
-    border-radius: var(--radius) var(--radius) 0 0;
-    box-shadow: 0 -10px 30px rgb(0 0 0 / 60%);
-  }
-}
-
-/* 画面の縦が短い端末では、さらに削って主画面を広げる */
-@media (max-width: 899px) and (max-height: 720px) {
-  :root { --pip: 68px; }
-  .topbar { min-height: 40px; }
-  .readout-label { font-size: 9px; }
-  .readout-value { font-size: 15px; }
-  .readout-cell { padding: 4px 8px 6px; }
-  .actionbar .primary-btn { min-height: 38px; font-size: 13px; }
-  .panel-tabs button { min-height: 30px; font-size: 11px; }
-}
-
-@media (max-width: 400px) {
-  .brand-name { display: none; }
-  .link-label { display: none; }
-  .readout-value { font-size: 16px; }
-  .street-flat-note { max-width: calc(100% - 60px); font-size: 10px; }
-}
-
-/* ==========================================================================
-   900px〜: 映像と地図を左右に並べ、パネルは右側に常時表示
-   ========================================================================== */
-
-@media (min-width: 900px) {
-  /* PCではスマホ用バナーを出さないので下部バーごと消す */
-  .ad-bar { display: none; }
-
-  #ad-pc-rect {
-    display: block;
-    position: fixed;
-    right: 10px;
-    bottom: 10px;
-    /* 実寸を確保しておく。admaxの読み込みが遅れても場所が潰れない */
-    width: 300px;
-    min-height: 250px;
-    /* Leafletのコントロール(z-index:800)より前に出す。
-       ここが 90 だったせいで、以前はPC広告が地図の後ろに隠れていた */
-    z-index: 1500;
-    background: var(--surface);
-    border: 1px solid var(--line-soft);
-    border-radius: var(--radius-sm);
-    overflow: hidden;
-  }
-
-  .layout { flex-direction: row; }
-
-  .stage {
-    display: grid;
-    grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
-    gap: 10px;
-    padding: 10px;
-  }
-
-  .sidebar {
-    width: 320px;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    border-left: 1px solid var(--line-soft);
-    /* 右下に固定した300x250の広告と重ならないよう、その高さぶん空ける */
-    padding-bottom: 270px;
-  }
-
-  .panel-tabs { order: -1; border-top: none; border-bottom: 1px solid var(--line-soft); }
-
-  .panel-body {
-    display: block;
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow-y: auto;
-  }
-
-  .actionbar {
-    border-top: 1px solid var(--line-soft);
-    justify-content: flex-end;
-  }
-
-  .actionbar .wide { width: auto; min-width: 280px; }
-
-  .toast { bottom: 88px; }
-}
-
-@media (min-width: 1400px) {
-  .sidebar { width: 360px; }
-}
-
-/* ==========================================================================
-   アニメーション
-   ========================================================================== */
-
-@keyframes spin { to { transform: rotate(360deg); } }
-
-@keyframes sweep {
-  0% { transform: translateX(-100%); }
-  100% { transform: translateX(250%); }
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-  }
-}
-
-/* ---------- 写真の上の地名オーバーレイ ----------
-   地理院「標準地図」を multiply で重ねる。
-   白い背景は写真をそのまま通し（白×画像=画像）、
-   黒い文字と道路だけが写真の上に焼き付く。
-   濃さを変えたいときは opacity を 0.7〜1.0 の範囲で調整する。 */
-
-.map-labels-tiles {
-  mix-blend-mode: multiply;
-  opacity: 0.95;
-  pointer-events: none;
-}
-
-/* 一覧が古いなど、注意を促したい note */
-.note.is-warn {
-  color: #f3b0aa;
-}
-
-/* ---------- 接続人数バッジ ----------
-   以前は「接続中・3人」という1行のテキストだったため、
-   スマホでは省略記号に潰れて人数が読めなかった。
-   人数だけ独立したバッジにして、狭い画面でも必ず残るようにする。 */
-
-.players-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 3px 9px;
-  font-size: 12px;
-  line-height: 1;
-  color: var(--text);
-}
-
-.players-icon { font-size: 11px; }
-
-.players-count {
-  font-family: var(--font-data);
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-}
-
-/* ホストであることの印 */
-.players-host {
-  background: var(--brand);
-  color: #fff;
-  border-radius: 4px;
-  padding: 1px 4px;
-  font-size: 9px;
-  font-weight: 700;
-}
-
-/* 注意を促す note */
-.note.is-warn { color: #f3b0aa; }
-
-/* 狭い画面では接続状態の文字だけ落とす。人数バッジは残す */
-@media (max-width: 480px) {
-  .link-label { display: none; }
-  .players-badge { padding: 3px 7px; font-size: 11px; }
-}
-
-/* ---------- 接続人数バッジ ----------
-   以前は「接続中・3人」という1行のテキストだったため、
-   スマホでは省略記号に潰れて人数が読めなかった。
-   人数だけ独立したバッジにして、狭い画面でも必ず残るようにする。
-   タップで順位表を開ける。 */
-
-.players-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 4px 9px;
-  font-size: 12px;
-  line-height: 1;
-  color: var(--text);
-  cursor: pointer;
-}
-
-.players-icon { font-size: 11px; }
-
-.players-count {
-  font-family: var(--font-data);
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-}
-
-/* ホストであることの印 */
-.players-host {
-  background: var(--brand);
-  color: #fff;
-  border-radius: 4px;
-  padding: 1px 4px;
-  font-size: 9px;
-  font-weight: 700;
-}
-
-/* 注意を促す note */
-.note.is-warn { color: #f3b0aa; }
-
-/* ---------- 順位表 ---------- */
-
 .rank-list {
   list-style: none;
   margin: 0;
@@ -1367,7 +963,6 @@ code {
   font-size: 13px;
 }
 
-/* 自分の行は枠線で目立たせる */
 .rank-list li.is-me {
   border-color: var(--brand);
   background: #10261f;
@@ -1439,28 +1034,163 @@ code {
   color: var(--signal);
 }
 
-/* ---------- 広告枠（PC 300x250） ----------
-   admaxのタグは document.write でiframeを差し込む。
-   枠に実寸を確保しておかないと、読み込みが遅れたときに
-   高さ0の箱に描画されて何も見えなくなる。 */
-
-#ad-pc-slot {
-  width: 300px;
-  height: 250px;
-  display: flex;
+.players-badge {
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
+  gap: 4px;
+  flex-shrink: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.players-icon { font-size: 11px; }
+
+.players-count {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.players-host {
+  background: var(--brand);
+  color: #fff;
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+/* 標準地図を multiply で重ね、白背景は写真を通し文字と道路だけを残す */
+.map-labels-tiles {
+  mix-blend-mode: multiply;
+  opacity: 0.95;
+  pointer-events: none;
+}
+
+/* 広告は同一オリジンのiframe(/ads/*.html)。実寸を固定で確保する */
+.ad-frame {
+  display: block;
+  border: 0;
+  background: transparent;
   overflow: hidden;
 }
 
-#ad-pc-slot iframe,
-#ad-pc-slot img {
-  display: block;
-  max-width: 300px;
-  max-height: 250px;
+.ad-bar {
+  flex: 0 0 auto;
+  height: 50px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ink);
+  border-top: 1px solid var(--line-soft);
+  padding-bottom: env(safe-area-inset-bottom);
+  box-sizing: content-box;
+  overflow: hidden;
 }
 
-/* 狭い画面では接続状態の文字だけ落とす。人数バッジは残す */
+.ad-bar .ad-frame { width: 320px; height: 50px; }
+
+.ad-pc { display: none; }
+
+@media (max-width: 899px) {
+
+  :root { --ad-h: 50px; }
+
+  .stage {
+    position: static;
+    display: flex;
+    padding: 4px;
+  }
+
+  .stage[data-focus="street"] .pane-street,
+  .stage[data-focus="map"] .pane-map {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .stage[data-focus="street"] .pane-map,
+  .stage[data-focus="map"] .pane-street {
+    position: absolute;
+    left: 4px;
+    bottom: 4px;
+    width: var(--pip);
+    height: var(--pip);
+    z-index: 5;
+    cursor: pointer;
+  }
+
+  /* 小窓側は触らせない。誤タップで地図にピンが立つのを防ぐ */
+  .stage[data-focus="street"] .pane-map > *,
+  .stage[data-focus="map"] .pane-street > * {
+    pointer-events: none;
+  }
+
+  .sidebar {
+    min-height: calc(var(--pip) + 8px);
+    padding: 4px 4px 4px calc(var(--pip) + 10px);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 5px;
+    border-top: none;
+  }
+
+  .panel-tabs { padding: 0; border-top: none; }
+  .panel-tabs button { min-height: 32px; padding: 5px 2px; font-size: 11px; }
+  .actionbar { padding: 0; border-top: none; }
+  .actionbar .primary-btn { min-height: 42px; }
+
+  .topbar { min-height: 44px; padding: 4px 10px; }
+  .readout-cell { padding: 5px 10px 7px; }
+  .readout-value { font-size: 17px; }
+
+  .street-playback {
+    left: 6px;
+    top: 6px;
+    max-width: calc(100% - 100px);
+  }
+  .street-controls { top: 6px; right: 6px; }
+
+  .pane-tabs { right: 6px; bottom: 6px; }
+
+  .map-coords { bottom: 62px; padding: 5px 9px; }
+  .map-coords-value { font-size: 12px; }
+
+  .toast { bottom: calc(var(--ad-h) + 110px); }
+
+  .app:not([data-panel="none"]) .panel-body {
+    display: block;
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    right: 0;
+    z-index: 150;
+    max-height: 58svh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    background: var(--surface);
+    border-top: 1px solid var(--line);
+    border-radius: var(--radius) var(--radius) 0 0;
+    box-shadow: 0 -10px 30px rgb(0 0 0 / 60%);
+  }
+}
+
+@media (max-width: 899px) and (max-height: 720px) {
+  :root { --pip: 68px; }
+  .topbar { min-height: 40px; }
+  .readout-label { font-size: 9px; }
+  .readout-value { font-size: 15px; }
+  .readout-cell { padding: 4px 8px 6px; }
+  .actionbar .primary-btn { min-height: 38px; font-size: 13px; }
+  .panel-tabs button { min-height: 30px; font-size: 11px; }
+}
+
 @media (max-width: 480px) {
   .link-label { display: none; }
   .players-badge { padding: 4px 7px; font-size: 11px; }
@@ -1468,7 +1198,189 @@ code {
   .rank-total { font-size: 14px; }
 }
 
-/* パネルタブが4つになったので、狭い画面では文字を詰める */
-@media (max-width: 899px) {
-  .panel-tabs button { font-size: 11px; padding: 5px 2px; }
+@media (max-width: 400px) {
+  .brand-name { display: none; }
+  .readout-value { font-size: 16px; }
+  .street-playback { max-width: calc(100% - 60px); }
+  .street-btn.is-wide { padding: 0 9px; font-size: 10px; }
+}
+
+@media (min-width: 900px) {
+
+  .ad-bar { display: none; }
+
+  .ad-pc {
+    display: block;
+    position: fixed;
+    right: 10px;
+    bottom: 10px;
+
+    width: 300px;
+    height: 250px;
+    /* Leafletのコントロール(z-index:800)より前に出す */
+    z-index: 1500;
+    background: var(--surface);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+
+  .ad-pc .ad-frame { width: 300px; height: 250px; }
+
+  .layout { flex-direction: row; }
+
+  .stage {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    padding: 10px;
+  }
+
+  /* 比率は App が --split-street / --split-map に書き込む */
+  .stage[data-mode="split"] .pane-street { flex: var(--split-street) 1 0; min-width: 0; }
+  .stage[data-mode="split"] .pane-map { flex: var(--split-map) 1 0; min-width: 0; }
+
+  .stage-split {
+    flex: 0 0 12px;
+    align-self: stretch;
+    cursor: col-resize;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    touch-action: none;
+  }
+
+  .stage-split-grip {
+    width: 4px;
+    height: 46px;
+    border-radius: 999px;
+    background: var(--line);
+    transition: background 0.15s ease, height 0.15s ease;
+  }
+
+  .stage-split:hover .stage-split-grip,
+  .stage-split:focus-visible .stage-split-grip {
+    background: var(--signal);
+    height: 72px;
+  }
+
+  .stage[data-mode="street"] .pane-street,
+  .stage[data-mode="map"] .pane-map {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .stage[data-mode="street"] .pane-map,
+  .stage[data-mode="map"] .pane-street {
+    position: absolute;
+    right: 20px;
+    bottom: 20px;
+    width: 260px;
+    height: 172px;
+    flex: 0 0 auto;
+    z-index: 6;
+    cursor: pointer;
+    box-shadow: 0 10px 28px rgb(0 0 0 / 55%);
+  }
+
+  .stage[data-mode="street"] .pane-map > *,
+  .stage[data-mode="map"] .pane-street > * {
+    pointer-events: none;
+  }
+
+  /* 小窓と重なる位置の操作を左へ逃がす */
+  .stage[data-mode="map"] .map-credit-btn,
+  .stage[data-mode="map"] .map-credit-panel {
+    right: 292px;
+  }
+
+  .stage-modes {
+    position: absolute;
+    left: 50%;
+    bottom: 18px;
+    transform: translateX(-50%);
+    z-index: 700;
+    display: flex;
+    gap: 4px;
+    background: rgb(7 12 11 / 90%);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 3px;
+  }
+
+  .sidebar {
+    width: 320px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-left: 1px solid var(--line-soft);
+    /* 右下に固定した300x250の広告と重ならないよう空ける */
+    padding-bottom: 272px;
+  }
+
+  .panel-tabs { order: -1; border-top: none; border-bottom: 1px solid var(--line-soft); }
+
+  .panel-body {
+    display: block;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .actionbar {
+    border-top: 1px solid var(--line-soft);
+    justify-content: flex-end;
+  }
+
+  .actionbar .wide { width: auto; min-width: 280px; }
+
+  .toast { bottom: 88px; }
+}
+
+@media (min-width: 1400px) {
+  .sidebar { width: 360px; }
+}
+
+.stage-modes button {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  border-radius: 999px;
+  padding: 6px 14px;
+  min-height: 30px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.stage-modes button.is-active { background: var(--brand); color: #fff; }
+
+.stage-modes.is-inline {
+  position: static;
+  transform: none;
+  display: flex;
+  background: var(--surface-2);
+}
+
+.stage-modes.is-inline button { flex: 1; min-height: 38px; font-size: 12px; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@keyframes sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

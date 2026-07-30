@@ -4,11 +4,10 @@ import StreetView from "./components/StreetView";
 import InstallButton from "./components/InstallButton";
 import { API_URL, useGameRoom } from "./lib/useGameRoom";
 import { formatClock, formatDistance, formatScore, proximityMessage } from "./lib/format";
-import type { GuessResult, LatLng, Mode, StartOptions } from "./lib/types";
+import type { GuessResult, LatLng, Mode, StageMode, StartOptions } from "./lib/types";
 
 type PanelKey = "settings" | "hints" | "rank" | "history" | null;
 
-/** サーバーの /regions が返す1件 */
 interface RegionItem {
   key: string;
   label: string;
@@ -34,10 +33,6 @@ const TIME_LIMIT_OPTIONS = [
 
 const ROUND_OPTIONS = [1, 3, 5, 8, 10];
 
-/**
- * グループの並び順。ここに無いグループは末尾へ回す。
- * サーバーが group を返さない古いAPIでも、全件が「その他」に入って一覧されるだけで壊れない。
- */
 const GROUP_ORDER = [
   "まとめ",
   "地方",
@@ -53,16 +48,19 @@ const GROUP_ORDER = [
   "海外｜その他",
 ];
 
-/** この件数を下回っていたら、APIが都道府県を知らない古い版だと判断して警告を出す */
 const EXPECTED_REGION_COUNT = 30;
 
 const SETTINGS_KEY = "geochase.settings.v1";
 const ROOM_KEY = "geochase.room.v1";
 const NAME_KEY = "geochase.name.v1";
+const STAGE_KEY = "geochase.stage.v1";
 const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{4,64}$/;
 
-/** 正解したあと、答えのピンを何ミリ秒残すか。すぐ消すと「見えなかった」になる */
 const REVEAL_HOLD_MS = 5000;
+
+const MIN_SPLIT = 0.25;
+const MAX_SPLIT = 0.75;
+const DEFAULT_SPLIT = 0.56;
 
 const DEFAULT_SETTINGS: StartOptions = {
   mode: "chase",
@@ -72,7 +70,6 @@ const DEFAULT_SETTINGS: StartOptions = {
   rounds: 5,
 };
 
-/** リロードやアプリ再起動でもゲームが続くようにルームIDを保存する。?room= があればそちらを優先 */
 function resolveRoomId(): string {
   const fromUrl = new URLSearchParams(window.location.search).get("room");
   if (fromUrl && ROOM_ID_PATTERN.test(fromUrl)) {
@@ -86,7 +83,6 @@ function resolveRoomId(): string {
   return created;
 }
 
-/** 順位表に出す表示名。未設定なら「プレイヤー1234」を割り当てる */
 function resolvePlayerName(): string {
   try {
     const saved = localStorage.getItem(NAME_KEY);
@@ -99,11 +95,6 @@ function resolvePlayerName(): string {
   }
 }
 
-/**
- * 900px以上（映像と地図を左右に並べる幅）かどうか。
- * 小窓かどうかの判定に使う。PCでは両方フル表示なので、
- * どちらを選んでいても操作ボタンを隠してはいけない。
- */
 function useIsWide(): boolean {
   const [wide, setWide] = useState(() => window.matchMedia("(min-width: 900px)").matches);
   useEffect(() => {
@@ -125,6 +116,23 @@ function loadSettings(): StartOptions {
   }
 }
 
+function loadStage(): { mode: StageMode; split: number } {
+  try {
+    const raw = localStorage.getItem(STAGE_KEY);
+    if (!raw) return { mode: "split", split: DEFAULT_SPLIT };
+    const parsed = JSON.parse(raw) as { mode?: StageMode; split?: number };
+    const mode: StageMode =
+      parsed.mode === "street" || parsed.mode === "map" ? parsed.mode : "split";
+    const split =
+      typeof parsed.split === "number" && Number.isFinite(parsed.split)
+        ? Math.min(MAX_SPLIT, Math.max(MIN_SPLIT, parsed.split))
+        : DEFAULT_SPLIT;
+    return { mode, split };
+  } catch {
+    return { mode: "split", split: DEFAULT_SPLIT };
+  }
+}
+
 export default function App() {
   const isWide = useIsWide();
   const [roomId] = useState(resolveRoomId);
@@ -142,13 +150,19 @@ export default function App() {
   const [streetSource, setStreetSource] = useState<"live" | "explore">("live");
   const [explore, setExplore] = useState<{ imageId: string; imageUrl: string } | null>(null);
   const [exploreLoading, setExploreLoading] = useState(false);
+  const [explorePin, setExplorePin] = useState<LatLng | null>(null);
   const [busy, setBusy] = useState(false);
   const [tick, setTick] = useState(0);
+
+  const initialStage = useRef(loadStage());
+  const [stageMode, setStageMode] = useState<StageMode>(initialStage.current.mode);
+  const [split, setSplit] = useState(initialStage.current.split);
+  const stageRef = useRef<HTMLElement>(null);
+  const draggingRef = useRef(false);
 
   const lastRoundKey = useRef("");
   const lastMoveSeen = useRef(0);
   const lastStatus = useRef<string>("");
-  /** 表示中の結果をエフェクト内から読むためのミラー */
   const resultRef = useRef<GuessResult | null>(null);
   resultRef.current = result;
 
@@ -180,7 +194,6 @@ export default function App() {
     onNotice: showToast,
   });
 
-  /** 自分がホストか。ホストだけが設定変更・開始・停止・次のラウンドをできる */
   const isHost = !state?.hostId || state.hostId === playerId;
 
   useEffect(() => {
@@ -191,9 +204,10 @@ export default function App() {
     if (playerName.trim()) localStorage.setItem(NAME_KEY, playerName.trim());
   }, [playerName]);
 
-  /* 捜索範囲の一覧を取得する。
-     一覧はサーバーの REGION_DEFS が出どころなので、
-     都道府県が出ない＝APIが古いまま、という切り分けができるようにしてある。 */
+  useEffect(() => {
+    localStorage.setItem(STAGE_KEY, JSON.stringify({ mode: stageMode, split }));
+  }, [stageMode, split]);
+
   useEffect(() => {
     if (!API_URL) return;
     fetch(`${API_URL}/regions`)
@@ -216,7 +230,6 @@ export default function App() {
       });
   }, []);
 
-  /* 捜索範囲をグループごとにまとめる（<optgroup>用） */
   const regionGroups = useMemo(() => {
     const map = new Map<string, RegionItem[]>();
     regions.forEach((r) => {
@@ -231,8 +244,7 @@ export default function App() {
     });
   }, [regions]);
 
-  /* ラウンドが変わったら表示をリセット。
-     ただし正解直後の答え合わせは数秒残す（すぐ消えると何も見えないため） */
+  // ラウンドが変わったら表示をリセット。正解直後の答え合わせだけ数秒残す
   useEffect(() => {
     if (!state) return;
     const key = `${state.status}:${state.round}:${state.imageId}`;
@@ -241,6 +253,7 @@ export default function App() {
 
     setStreetSource("live");
     setExplore(null);
+    setExplorePin(null);
 
     if (state.status === "running") {
       setGuessPin(null);
@@ -253,7 +266,6 @@ export default function App() {
     }
   }, [state]);
 
-  /* ゲームが終わったら順位表を自動で開く */
   useEffect(() => {
     if (!state) return;
     if (state.status === lastStatus.current) return;
@@ -261,7 +273,6 @@ export default function App() {
     if (state.status === "finished") setPanel("rank");
   }, [state?.status]);
 
-  /* 逃走者が移動したら知らせる。地図の軌跡ピンもこのタイミングで1つ増える */
   useEffect(() => {
     if (!state?.lastMoveAt) return;
     if (lastMoveSeen.current === 0) {
@@ -275,7 +286,6 @@ export default function App() {
     }
   }, [state?.lastMoveAt, state?.mode, state?.status, state?.round, showToast]);
 
-  /* カウントダウンのティック。表示はサーバー時刻から計算するのでズレない */
   useEffect(() => {
     const running = state?.status === "running" && (state.nextUpdateAt > 0 || state.roundEndsAt > 0);
     if (!running) return;
@@ -283,12 +293,12 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [state?.status, state?.nextUpdateAt, state?.roundEndsAt]);
 
-  /* ---- 操作 ---- */
   const handleStart = useCallback(async () => {
     setBusy(true);
     setResult(null);
     setGuessPin(null);
     setExplore(null);
+    setExplorePin(null);
     try {
       await start(settings);
       setPanel(null);
@@ -332,21 +342,36 @@ export default function App() {
     if (!guessPin) return;
     setExploreLoading(true);
     try {
-      const res = await fetch(`${API_URL}/nearby-image?lat=${guessPin.lat}&lng=${guessPin.lng}`);
+      const res = await fetch(`${API_URL}/nearby-image?lat=${guessPin.lat}&lng=${guessPin.lng}&car=1`);
       const data = await res.json();
       if (data?.found && data.imageId) {
         setExplore({ imageId: data.imageId, imageUrl: data.imageUrl ?? "" });
         setStreetSource("explore");
-        setFocusedPane("street");
+        if (isWide) setStageMode("split");
+        else setFocusedPane("street");
       } else {
-        showToast(data?.error ?? "この付近には画像がありません");
+        showToast(data?.error ?? "この付近には自動車から撮られた画像がありません");
       }
     } catch {
       showToast("画像の検索に失敗しました");
     } finally {
       setExploreLoading(false);
     }
-  }, [guessPin, showToast]);
+  }, [guessPin, isWide, showToast]);
+
+  // 下見中は「いま見ている場所」がそのまま回答候補なので、映像が動いたらピンも動かす。
+  // 現地（答えの映像）を見ているときは答えが漏れるので何もしない
+  const handleStreetMove = useCallback(
+    (lat: number, lng: number) => {
+      if (streetSource !== "explore") return;
+      const next = { lat, lng };
+      setExplorePin(next);
+      if (state?.status === "running" && !state?.moving && !result?.waiting) {
+        setGuessPin(next);
+      }
+    },
+    [result?.waiting, state?.moving, state?.status, streetSource]
+  );
 
   const shareResult = useCallback(async () => {
     if (!state) return;
@@ -364,9 +389,7 @@ export default function App() {
         await navigator.clipboard.writeText(`${text}\n${url}`);
         showToast("結果をコピーしました");
       }
-    } catch {
-      /* ユーザーがキャンセルした */
-    }
+    } catch {}
   }, [state, playerId, showToast]);
 
   const copyInvite = useCallback(async () => {
@@ -395,7 +418,55 @@ export default function App() {
     window.location.search = `?room=${id}`;
   }, []);
 
-  /* ---- キーボード操作（PC向け） ---- */
+  const applySplitFromClientX = useCallback((clientX: number) => {
+    const el = stageRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const ratio = (clientX - rect.left) / rect.width;
+    setSplit(Math.min(MAX_SPLIT, Math.max(MIN_SPLIT, ratio)));
+  }, []);
+
+  const startDrag = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      e.stopPropagation();
+      draggingRef.current = true;
+      (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+      document.body.classList.add("is-resizing");
+    },
+    []
+  );
+
+  const onDrag = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!draggingRef.current) return;
+      applySplitFromClientX(e.clientX);
+    },
+    [applySplitFromClientX]
+  );
+
+  const endDrag = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    draggingRef.current = false;
+    (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+    document.body.classList.remove("is-resizing");
+  }, []);
+
+  const onSplitKey = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      setSplit((s) => Math.max(MIN_SPLIT, s - 0.04));
+    }
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      setSplit((s) => Math.min(MAX_SPLIT, s + 0.04));
+    }
+    if (e.key === "Home") {
+      e.preventDefault();
+      setSplit(DEFAULT_SPLIT);
+    }
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -404,15 +475,20 @@ export default function App() {
         e.preventDefault();
         submitGuess();
       }
-      if (e.key.toLowerCase() === "m") setFocusedPane((p) => (p === "street" ? "map" : "street"));
+      if (e.key.toLowerCase() === "m") {
+        if (isWide) setStageMode((m) => (m === "map" ? "split" : "map"));
+        else setFocusedPane((p) => (p === "street" ? "map" : "street"));
+      }
+      if (e.key.toLowerCase() === "v" && isWide) {
+        setStageMode((m) => (m === "street" ? "split" : "street"));
+      }
       if (e.key.toLowerCase() === "h" && state?.status === "running") requestHint();
       if (e.key === "Escape") setPanel(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [guessPin, state?.status, submitGuess, requestHint]);
+  }, [guessPin, isWide, state?.status, submitGuess, requestHint]);
 
-  /* ---- 派生値 ---- */
   const isRunning = state?.status === "running";
   const isReveal = state?.status === "reveal";
   const isFinished = state?.status === "finished";
@@ -421,10 +497,8 @@ export default function App() {
   const players = state?.players ?? 1;
   const answered = state?.answered ?? 0;
   const scoreboard = state?.scoreboard ?? [];
-  /** 通常モードで自分は答え済みだが、他の人を待っている */
   const waitingOthers = Boolean(result?.waiting);
 
-  /** 自分の成績と順位（1始まり。見つからなければ null） */
   const myRank = useMemo(() => {
     const i = scoreboard.findIndex((p) => p.id === playerId);
     return i < 0 ? null : { rank: i + 1, ...scoreboard[i] };
@@ -450,11 +524,10 @@ export default function App() {
       : { imageId: state?.imageId ?? "", imageUrl: state?.imageUrl ?? "" };
 
   const urgency = countdown ? (countdown.ratio < 0.15 ? "critical" : countdown.ratio < 0.4 ? "warn" : "calm") : "calm";
-  // 横に並べられる幅なら、どちらも主画面なので小窓扱いにしない
-  const streetCompact = !isWide && focusedPane !== "street";
-  const mapCompact = !isWide && focusedPane !== "map";
 
-  /* ---- 設定不備の案内 ---- */
+  const streetCompact = isWide ? stageMode === "map" : focusedPane !== "street";
+  const mapCompact = isWide ? stageMode === "street" : focusedPane !== "map";
+
   if (!API_URL) {
     return (
       <div className="setup-screen">
@@ -476,10 +549,6 @@ export default function App() {
           <span className="brand-name">GeoChase</span>
         </div>
 
-        {/*
-          接続状態と人数。狭い画面では文字が省略されて人数が見えなくなっていたので、
-          人数だけは常に読めるバッジとして独立させてある。
-        */}
         <div className="topbar-meta">
           <span className={`link-dot link-${connection}`} aria-hidden="true" />
           <button
@@ -510,7 +579,6 @@ export default function App() {
         </div>
       </header>
 
-      {/* 常に同じ高さで表示する。出し入れすると画面全体がずれるため */}
       <div className="readout" data-urgency={urgency}>
         <div className="readout-cell">
           <span className="readout-label">ラウンド</span>
@@ -526,7 +594,6 @@ export default function App() {
           </span>
         </div>
 
-        {/* 自分の累計スコアと順位。複数人なら「3位」も出す */}
         <div className="readout-cell">
           <span className="readout-label">
             {state?.mode === "classic" && isRunning ? `回答 ${answered}/${players}人` : "あなたの得点"}
@@ -564,8 +631,23 @@ export default function App() {
       </div>
 
       <div className="layout">
-        <main className="stage" data-focus={focusedPane}>
-          <section className="pane pane-street" onClick={() => setFocusedPane("street")} aria-label="ストリート画像">
+        <main
+          className="stage"
+          ref={stageRef}
+          data-focus={focusedPane}
+          data-mode={isWide ? stageMode : "focus"}
+          style={
+            {
+              "--split-street": String(split),
+              "--split-map": String(1 - split),
+            } as React.CSSProperties
+          }
+        >
+          <section
+            className="pane pane-street"
+            onClick={() => (isWide ? stageMode === "map" && setStageMode("split") : setFocusedPane("street"))}
+            aria-label="ストリート画像"
+          >
             {streetCompact ? (
               <span className="pip-label">タップで映像を大きく</span>
             ) : (
@@ -597,15 +679,47 @@ export default function App() {
             <StreetView
               imageId={displayed.imageId}
               imageUrl={displayed.imageUrl}
+              compassAngle={state?.compassAngle ?? null}
+              imageMissing={Boolean(state?.imageMissing) && streetSource === "live"}
               compact={streetCompact}
               apiUrl={API_URL}
+              onMove={handleStreetMove}
             />
           </section>
 
-          <section className="pane pane-map" onClick={() => setFocusedPane("map")} aria-label="地図">
+          {isWide && stageMode === "split" && (
+            <div
+              className="stage-split"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="映像と地図の比率"
+              aria-valuenow={Math.round(split * 100)}
+              aria-valuemin={Math.round(MIN_SPLIT * 100)}
+              aria-valuemax={Math.round(MAX_SPLIT * 100)}
+              tabIndex={0}
+              onPointerDown={startDrag}
+              onPointerMove={onDrag}
+              onPointerUp={endDrag}
+              onPointerCancel={endDrag}
+              onKeyDown={onSplitKey}
+              onDoubleClick={() => setSplit(DEFAULT_SPLIT)}
+              title="ドラッグで比率を変更／ダブルクリックで半々に戻す"
+            >
+              <span className="stage-split-grip" aria-hidden="true" />
+            </div>
+          )}
+
+          <section
+            className="pane pane-map"
+            onClick={() => (isWide ? stageMode === "street" && setStageMode("split") : setFocusedPane("map"))}
+            aria-label="地図"
+          >
             {mapCompact && <span className="pip-label">タップで地図を大きく</span>}
             <MapView
-              onPick={(lat, lng) => setGuessPin({ lat, lng })}
+              onPick={(lat, lng) => {
+                setGuessPin({ lat, lng });
+                setExplorePin(null);
+              }}
               markerPosition={guessPin}
               targetPosition={result?.target ?? null}
               trail={state?.revealedTrail ?? []}
@@ -613,10 +727,39 @@ export default function App() {
               compact={mapCompact}
               onExplore={guessPin && isRunning && !isMoving ? exploreHere : undefined}
               exploreLoading={exploreLoading}
+              panTo={streetSource === "explore" ? explorePin : null}
             />
           </section>
 
-          {/* 次の地点を探している間は、画面が固まったように見えないよう明示する */}
+          {isWide && (
+            <div className="stage-modes" role="group" aria-label="表示の割り当て">
+              <button
+                type="button"
+                className={stageMode === "street" ? "is-active" : ""}
+                onClick={() => setStageMode("street")}
+                title="映像だけを大きく表示（V）"
+              >
+                映像
+              </button>
+              <button
+                type="button"
+                className={stageMode === "split" ? "is-active" : ""}
+                onClick={() => setStageMode("split")}
+                title="左右に並べる。仕切りのドラッグで比率を変えられます"
+              >
+                左右
+              </button>
+              <button
+                type="button"
+                className={stageMode === "map" ? "is-active" : ""}
+                onClick={() => setStageMode("map")}
+                title="地図だけを大きく表示（M）"
+              >
+                地図
+              </button>
+            </div>
+          )}
+
           {(isMoving || busy) && (
             <div className="stage-overlay" role="status">
               <span className="street-spinner" aria-hidden="true" />
@@ -704,6 +847,7 @@ export default function App() {
                 ) : (
                   <p className="note">
                     範囲を絞るほどヒントは細かいところから始まります（都道府県を選ぶと市区町村から）。
+                    自動車の撮影が無いエリアでは、自動でひとつ広い範囲に切り替わります。
                   </p>
                 )}
 
@@ -760,6 +904,40 @@ export default function App() {
                   最後に累計スコアの順位が出ます。
                 </p>
                 <p className="note">設定を変えたら上の「スタート」でやり直します。</p>
+
+                {isWide && (
+                  <>
+                    <h2>画面の割り当て</h2>
+                    <div className="stage-modes is-inline" role="group" aria-label="表示の割り当て">
+                      <button
+                        type="button"
+                        className={stageMode === "street" ? "is-active" : ""}
+                        onClick={() => setStageMode("street")}
+                      >
+                        映像だけ
+                      </button>
+                      <button
+                        type="button"
+                        className={stageMode === "split" ? "is-active" : ""}
+                        onClick={() => setStageMode("split")}
+                      >
+                        左右に並べる
+                      </button>
+                      <button
+                        type="button"
+                        className={stageMode === "map" ? "is-active" : ""}
+                        onClick={() => setStageMode("map")}
+                      >
+                        地図だけ
+                      </button>
+                    </div>
+                    <p className="note">
+                      左右に並べているときは、映像と地図のあいだの仕切りをドラッグすると比率を変えられます。
+                      ダブルクリックで半々に戻ります（キーボードは ← → ）。
+                      V で映像だけ、M で地図だけに切り替わります。
+                    </p>
+                  </>
+                )}
 
                 <h2>ルーム</h2>
                 <p className="note">

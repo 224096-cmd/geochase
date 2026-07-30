@@ -3,49 +3,69 @@ import "mapillary-js/dist/mapillary.css";
 
 interface Props {
   imageId: string;
-  /** mapillary-jsが失敗したときに表示する静止画URL */
   imageUrl?: string;
-  /** 画像が見えるようになったら呼ばれる */
+  compassAngle?: number | null;
+  imageMissing?: boolean;
   onReady?: () => void;
-  /** 小窓表示中。操作系を隠す */
+  onMove?: (lat: number, lng: number, imageId: string) => void;
   compact?: boolean;
-  /** 近くの別画像を探すのに使うAPIのベースURL。未指定ならその機能を出さない */
   apiUrl?: string;
 }
 
 const MAPILLARY_TOKEN = import.meta.env.VITE_MAPILLARY_TOKEN as string | undefined;
-/** これ以上待っても表示されないなら静止画に切り替える */
 const LOAD_TIMEOUT_MS = 12_000;
+
+const PLAY_LENGTH_OPTIONS = [
+  { seconds: 3, label: "3秒" },
+  { seconds: 6, label: "6秒" },
+  { seconds: 12, label: "12秒" },
+  { seconds: 30, label: "30秒" },
+  { seconds: 0, label: "止めるまで" },
+];
+
+const PLAY_LENGTH_KEY = "geochase.playLength.v1";
 
 type Phase = "empty" | "loading" | "ready" | "fallback" | "failed";
 type Playback = "none" | "forward" | "reverse";
 
-export default function StreetView({ imageId, imageUrl, onReady, compact = false, apiUrl }: Props) {
+function loadPlayLength(): number {
+  const raw = Number(localStorage.getItem(PLAY_LENGTH_KEY));
+  return PLAY_LENGTH_OPTIONS.some((o) => o.seconds === raw) ? raw : 6;
+}
+
+export default function StreetView({
+  imageId,
+  imageUrl,
+  compassAngle,
+  imageMissing = false,
+  onReady,
+  onMove,
+  compact = false,
+  apiUrl,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
-  /** mapillary-js の NavigationDirection enum。動的importなのでrefに退避しておく */
   const navDirRef = useRef<any>(null);
 
-  /** そのラウンドの開始地点。「開始地点に戻る」で使う */
   const homeIdRef = useRef("");
-  /** ビューアがいま表示している画像の情報 */
   const currentRef = useRef<{ id: string; lat: number; lng: number; sequenceId: string } | null>(null);
+  const playTimerRef = useRef<number | null>(null);
 
   const [phase, setPhase] = useState<Phase>("empty");
-  /** 画像タイルやメタデータを取りに行っている最中 */
   const [dataLoading, setDataLoading] = useState(false);
-  /** 開始地点から動いているか */
   const [movedAway, setMovedAway] = useState(false);
   const [playback, setPlayback] = useState<Playback>("none");
-  /** 近くの別画像を検索中 */
+  const [playLength, setPlayLength] = useState<number>(loadPlayLength);
   const [seeking, setSeeking] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
+  const onMoveRef = useRef(onMove);
+  onMoveRef.current = onMove;
+  const playLengthRef = useRef(playLength);
+  playLengthRef.current = playLength;
 
-  /* mapillary-jsは拡大するほど高解像度のタイルを読み込む。
-     看板を読むにはズームが要るので、ピンチだけでなくボタンでも操作できるようにする。 */
   const zoomRef = useRef(0);
 
   const flash = useCallback((message: string) => {
@@ -53,9 +73,28 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
     window.setTimeout(() => setNotice((n) => (n === message ? null : n)), 2600);
   }, []);
 
-  /* ------------------------------------------------------------------ *
-   * ビューアの生成（1回だけ）
-   * ------------------------------------------------------------------ */
+  useEffect(() => {
+    localStorage.setItem(PLAY_LENGTH_KEY, String(playLength));
+  }, [playLength]);
+
+  // basic image coordinates の [0.5, 0.5] が撮影時の正面。読み込み直後は必ずここへ戻す
+  const faceForward = useCallback(() => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    try {
+      viewer.setCenter([0.5, 0.5]);
+      viewer.setZoom(0);
+      zoomRef.current = 0;
+    } catch {}
+  }, []);
+
+  const clearPlayTimer = useCallback(() => {
+    if (playTimerRef.current !== null) {
+      window.clearTimeout(playTimerRef.current);
+      playTimerRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     if (!MAPILLARY_TOKEN || !containerRef.current) return;
     let disposed = false;
@@ -68,22 +107,18 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
         const viewer = new Viewer({
           accessToken: MAPILLARY_TOKEN,
           container: containerRef.current,
-          // コンストラクタにimageIdを渡すと失敗を捕捉できないので、必ずmoveToで移動する
           component: {
             cover: false,
-            // 矢印(direction)と前後移動(sequence)を出す。
-            // これが無いと「その場から動けない」ように見える
             direction: true,
             sequence: true,
             bearing: true,
-            // ズームは自前のボタンを使うので内蔵UIは消す
+            // Mapillaryの画像はCC BY-SA。出所表示は消さない
+            attribution: true,
             zoom: false,
             pointer: { dragPan: true, scrollZoom: true, touchZoom: true },
             keyboard: true,
           },
-          // 平面写真でも隣の写真とつないで広い範囲を見回せるようにする
           combinedPanning: true,
-          // 拡大したときに高解像度タイルを取りに行く。看板を読むのに必須
           imageTiling: true,
           trackResize: true,
         } as any);
@@ -93,23 +128,27 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
         viewer.on("image", (e: any) => {
           const img = e?.image;
           if (!img) return;
+          const lat = img.lngLat?.lat ?? 0;
+          const lng = img.lngLat?.lng ?? 0;
           currentRef.current = {
             id: img.id,
-            lat: img.lngLat?.lat ?? 0,
-            lng: img.lngLat?.lng ?? 0,
+            lat,
+            lng,
             sequenceId: img.sequenceId ?? "",
           };
           setMovedAway(Boolean(homeIdRef.current) && img.id !== homeIdRef.current);
+          if (lat || lng) onMoveRef.current?.(lat, lng, img.id);
         });
 
         try {
           const seq: any = viewer.getComponent("sequence");
           seq?.on?.("playing", (e: any) => {
-            if (e && e.playing === false) setPlayback("none");
+            if (e && e.playing === false) {
+              setPlayback("none");
+              clearPlayTimer();
+            }
           });
-        } catch {
-          /* sequenceコンポーネントが無い環境 */
-        }
+        } catch {}
 
         viewerRef.current = viewer;
       })
@@ -121,32 +160,26 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
     return () => {
       disposed = true;
     };
-    // 生成は1度だけ。imageUrlは初回失敗時の表示切り替えにしか使わない
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* ------------------------------------------------------------------ *
-   * ラウンドが変わったら、その地点へ移動する
-   * ------------------------------------------------------------------ */
   useEffect(() => {
     if (!MAPILLARY_TOKEN) return;
 
     if (!imageId) {
-      setPhase("empty");
+      setPhase(imageUrl ? "fallback" : "empty");
       return;
     }
 
-    // 前の画像の「表示済み」状態とズーム倍率を持ち越さない
     setPhase("loading");
     setPlayback("none");
     setMovedAway(false);
+    clearPlayTimer();
     zoomRef.current = 0;
     homeIdRef.current = imageId;
 
     let cancelled = false;
     const timer = window.setTimeout(() => {
       if (cancelled) return;
-      // 表示できなくてもゲーム進行を止めないよう、静止画に切り替えて先へ進める
       setPhase(imageUrl ? "fallback" : "failed");
       onReadyRef.current?.();
     }, LOAD_TIMEOUT_MS);
@@ -158,7 +191,6 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
       onReadyRef.current?.();
     };
 
-    // ビューアの生成が非同期なので、出来上がるまで少し待つ
     const startAt = Date.now();
     const tryMove = () => {
       if (cancelled) return;
@@ -170,12 +202,13 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
       }
       try {
         viewer.getComponent("sequence")?.stop?.();
-      } catch {
-        /* noop */
-      }
+      } catch {}
       viewer
         .moveTo(imageId)
-        .then(() => settle("ready"))
+        .then(() => {
+          faceForward();
+          settle("ready");
+        })
         .catch((err: unknown) => {
           console.error("Mapillary moveTo failed", err);
           settle(imageUrl ? "fallback" : "failed");
@@ -187,52 +220,41 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [imageId, imageUrl]);
+  }, [imageId, imageUrl, faceForward, clearPlayTimer]);
 
-  /* 小窓⇔全画面でコンテナのサイズが変わるので、ビューアに再計測させる */
   useEffect(() => {
     const t = window.setTimeout(() => {
       try {
         viewerRef.current?.resize?.();
-      } catch {
-        /* 未初期化 */
-      }
+      } catch {}
     }, 260);
     return () => window.clearTimeout(t);
   }, [compact]);
 
   useEffect(
     () => () => {
+      if (playTimerRef.current !== null) window.clearTimeout(playTimerRef.current);
       try {
         viewerRef.current?.remove?.();
-      } catch {
-        /* noop */
-      }
+      } catch {}
       viewerRef.current = null;
     },
     []
   );
 
-  /* ------------------------------------------------------------------ *
-   * 操作
-   * ------------------------------------------------------------------ */
-
   const stopPlayback = useCallback(() => {
+    clearPlayTimer();
     try {
       viewerRef.current?.getComponent("sequence")?.stop?.();
-    } catch {
-      /* noop */
-    }
+    } catch {}
     setPlayback("none");
-  }, []);
+  }, [clearPlayTimer]);
 
   const applyZoom = useCallback((next: number) => {
     zoomRef.current = Math.max(0, Math.min(4, next));
     try {
       viewerRef.current?.setZoom(zoomRef.current);
-    } catch {
-      /* 未初期化 */
-    }
+    } catch {}
   }, []);
 
   const zoomIn = useCallback(
@@ -251,21 +273,14 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
     [applyZoom]
   );
 
-  /** 視点だけを正面に戻す */
   const resetView = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
-      try {
-        viewerRef.current?.setCenter([0.5, 0.5]);
-      } catch {
-        /* 未初期化 */
-      }
-      applyZoom(0);
+      faceForward();
     },
-    [applyZoom]
+    [faceForward]
   );
 
-  /** 歩き回ったあとに、そのラウンドの開始地点へ戻る */
   const goHome = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
@@ -277,22 +292,16 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
         .moveTo(homeIdRef.current)
         .then(() => {
           setPhase("ready");
-          applyZoom(0);
-          try {
-            viewer.setCenter([0.5, 0.5]);
-          } catch {
-            /* noop */
-          }
+          faceForward();
         })
         .catch(() => {
           setPhase("ready");
           flash("開始地点に戻れませんでした");
         });
     },
-    [applyZoom, flash, stopPlayback]
+    [faceForward, flash, stopPlayback]
   );
 
-  /** 順再生 / 逆再生。同じボタンをもう一度押すと停止 */
   const togglePlayback = useCallback(
     (e: React.MouseEvent, direction: Playback) => {
       e.stopPropagation();
@@ -309,69 +318,80 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
       if (!seq) return;
 
       if (playback === direction) {
-        seq.stop?.();
-        setPlayback("none");
+        stopPlayback();
         return;
       }
 
       try {
+        clearPlayTimer();
         seq.configure({ direction: direction === "forward" ? ND.Next : ND.Prev });
         seq.play?.();
         setPlayback(direction);
-        flash(direction === "forward" ? "順再生します" : "逆再生します");
+
+        const seconds = playLengthRef.current;
+        if (seconds > 0) {
+          playTimerRef.current = window.setTimeout(() => {
+            playTimerRef.current = null;
+            try {
+              viewerRef.current?.getComponent("sequence")?.stop?.();
+            } catch {}
+            setPlayback("none");
+          }, seconds * 1000);
+          flash(`${direction === "forward" ? "順再生" : "逆再生"}（${seconds}秒）`);
+        } else {
+          flash(direction === "forward" ? "順再生します" : "逆再生します");
+        }
       } catch (err) {
         console.error("sequence playback failed", err);
         flash("この地点では再生できません");
       }
     },
-    [flash, playback]
+    [clearPlayTimer, flash, playback, stopPlayback]
   );
 
-  /**
-   * 近くの別の地点へ移る。
-   *
-   * 以前は「別シーケンスかつ50m以上」の1回だけ問い合わせていたため、
-   * その条件に合う画像が無いと何も起きなかった。
-   * 条件を段階的にゆるめて3回試し、必ず何かしら動くようにしてある。
-   */
+  // 問い合わせは1回だけ。条件のゆるめ方はサーバー側に寄せてある。
+  // それでも駄目ならビューア自身の前後移動で必ず何か動かす
   const jumpNearby = useCallback(
     async (e: React.MouseEvent) => {
       e.stopPropagation();
       const current = currentRef.current;
-      if (!apiUrl || !current || !current.lat) return;
+      if (!current || !current.lat) return;
 
       stopPlayback();
       setSeeking(true);
 
-      const base = () =>
-        new URLSearchParams({
-          lat: String(current.lat),
-          lng: String(current.lng),
-          exclude: current.id,
-        });
-
-      // 上から順に試し、最初に見つかったものへ移動する
-      const attempts: URLSearchParams[] = [];
-      // 1) 別の撮影シーケンスで50m以上離れた画像
-      const a = base();
-      if (current.sequenceId) a.set("excludeSeq", current.sequenceId);
-      a.set("minKm", "0.05");
-      attempts.push(a);
-      // 2) シーケンスは問わず150m以上（同じ道でも景色が確実に変わる）
-      const b = base();
-      b.set("minKm", "0.15");
-      attempts.push(b);
-      // 3) 最後はとにかく別の画像へ
-      attempts.push(base());
-
       try {
-        for (const params of attempts) {
+        if (apiUrl) {
+          const params = new URLSearchParams({
+            lat: String(current.lat),
+            lng: String(current.lng),
+            exclude: current.id,
+            car: "1",
+            minKm: "0.05",
+          });
+          if (current.sequenceId) params.set("excludeSeq", current.sequenceId);
+
           const res = await fetch(`${apiUrl}/nearby-image?${params.toString()}`);
           const data = await res.json();
           if (data?.found && data.imageId && data.imageId !== current.id) {
             await viewerRef.current?.moveTo(data.imageId);
+            faceForward();
             flash("近くの別の地点に移動しました");
             return;
+          }
+        }
+
+        const ND = navDirRef.current;
+        const viewer = viewerRef.current;
+        if (viewer && ND) {
+          for (const dir of [ND.Next, ND.Prev, ND.TurnRight, ND.TurnLeft]) {
+            if (dir === undefined) continue;
+            try {
+              await viewer.moveDir(dir);
+              faceForward();
+              flash("同じ道を少し進みました");
+              return;
+            } catch {}
           }
         }
         flash("近くにこれ以上の地点がありません");
@@ -381,7 +401,7 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
         setSeeking(false);
       }
     },
-    [apiUrl, flash, stopPlayback]
+    [apiUrl, faceForward, flash, stopPlayback]
   );
 
   if (!MAPILLARY_TOKEN) {
@@ -405,10 +425,14 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
         style={{ visibility: phase === "ready" ? "visible" : "hidden" }}
       />
 
-      {/* 読み込み中は上端に細いバーを出す。画面が固まったのか読み込み中なのかが一目で分かる */}
       {(dataLoading || seeking) && phase === "ready" && <span className="street-progress" aria-hidden="true" />}
 
-      {phase === "fallback" && imageUrl && <img className="street-fallback" src={imageUrl} alt="現在地のストリート画像" />}
+      {phase === "fallback" && imageUrl && (
+        <>
+          <img className="street-fallback" src={imageUrl} alt="現在地のストリート画像" />
+          <span className="street-credit">© Mapillary（CC BY-SA）</span>
+        </>
+      )}
 
       {phase === "loading" && (
         <div className="street-message">
@@ -419,14 +443,21 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
 
       {phase === "empty" && (
         <div className="street-message">
-          <p>スタートすると、ここに現地の風景が出ます</p>
+          {imageMissing ? (
+            <>
+              <p className="street-message-title">この地点の写真が見つかりませんでした</p>
+              <p>自動車から撮られた画像が周辺にありません。ヒントと地図で推理してください。</p>
+            </>
+          ) : (
+            <p>スタートすると、ここに現地の風景が出ます</p>
+          )}
         </div>
       )}
 
       {phase === "failed" && (
         <div className="street-message">
-          <p className="street-message-title">画像を取得できませんでした</p>
-          <p>この地点には見られる画像がありません。地図とヒントで推理してください。</p>
+          <p className="street-message-title">画像を表示できませんでした</p>
+          <p>通信が不安定か、画像の配信が止まっています。「別の道へ」で近くの地点を試せます。</p>
         </div>
       )}
 
@@ -436,30 +467,6 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
         </div>
       )}
 
-      {showControls && (
-        <div className="street-controls">
-          <button type="button" className="street-btn" onClick={zoomIn} aria-label="拡大">
-            ＋
-          </button>
-          <button type="button" className="street-btn" onClick={zoomOut} aria-label="縮小">
-            −
-          </button>
-          <button type="button" className="street-btn is-wide" onClick={resetView}>
-            正面
-          </button>
-          <button
-            type="button"
-            className={`street-btn is-wide${movedAway ? " is-accent" : ""}`}
-            onClick={goHome}
-            disabled={!movedAway}
-            title="このラウンドの開始地点へ戻ります"
-          >
-            開始地点
-          </button>
-        </div>
-      )}
-
-      {/* 再生系は下段にまとめる。逆再生＝来た道を戻る */}
       {showControls && (
         <div className="street-playback">
           <button
@@ -480,17 +487,52 @@ export default function StreetView({ imageId, imageUrl, onReady, compact = false
           >
             {playback === "forward" ? "■ 停止" : "▶▶ 順再生"}
           </button>
-          {apiUrl && (
-            <button
-              type="button"
-              className="street-btn is-wide"
-              onClick={jumpNearby}
-              disabled={seeking}
-              title="行き止まりのときは近くの別の地点へ移ります"
+          <label className="street-select" onClick={(e) => e.stopPropagation()}>
+            <span className="sr-only">再生の長さ</span>
+            <select
+              value={playLength}
+              onChange={(e) => setPlayLength(Number(e.target.value))}
+              title="再生の長さ"
             >
-              {seeking ? "探索中…" : "別の道へ"}
-            </button>
-          )}
+              {PLAY_LENGTH_OPTIONS.map((o) => (
+                <option key={o.seconds} value={o.seconds}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="street-btn is-wide"
+            onClick={jumpNearby}
+            disabled={seeking}
+            title="行き止まりのときは近くの別の地点へ移ります"
+          >
+            {seeking ? "探索中…" : "別の道へ"}
+          </button>
+        </div>
+      )}
+
+      {showControls && (
+        <div className="street-controls">
+          <button type="button" className="street-btn" onClick={zoomIn} aria-label="拡大">
+            ＋
+          </button>
+          <button type="button" className="street-btn" onClick={zoomOut} aria-label="縮小">
+            −
+          </button>
+          <button type="button" className="street-btn is-wide" onClick={resetView} title="進行方向（正面）を向きます">
+            正面
+          </button>
+          <button
+            type="button"
+            className={`street-btn is-wide${movedAway ? " is-accent" : ""}`}
+            onClick={goHome}
+            disabled={!movedAway}
+            title="このラウンドの開始地点へ戻ります"
+          >
+            開始地点
+          </button>
         </div>
       )}
     </div>
