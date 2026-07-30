@@ -109,6 +109,7 @@ code {
 
 .topbar,
 .readout,
+.toolbar,
 .actionbar {
   flex: 0 0 auto;
 }
@@ -316,6 +317,51 @@ code {
 .readout[data-urgency="critical"] .readout-timer .readout-value { color: var(--hot); }
 .readout[data-urgency="critical"] .readout-bar { background: var(--hot); }
 
+/* 映像の操作バー。映像に重ねず独立した行として置く */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line-soft);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.toolbar::-webkit-scrollbar { display: none; }
+
+.tool-btn {
+  flex: 0 0 auto;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  height: 32px;
+  padding: 0 12px;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tool-btn.is-on { background: var(--brand); border-color: var(--brand); color: #fff; }
+.tool-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.tool-select { flex: 0 0 auto; display: inline-flex; }
+
+.tool-select select {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  height: 32px;
+  padding: 0 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.tool-select select option { background: var(--surface-2); color: var(--text); }
+
 /* Leafletは内部で z-index 400〜800 を使う。ここで閉じ込めないと
    結果バナーやPC広告がタイルの後ろに回り込む */
 .pane {
@@ -392,7 +438,7 @@ code {
   pointer-events: none;
 }
 
-/* 現地／下見タブは右下。左上は再生系、右上は視点操作で埋まっている */
+/* 現地／下見タブは右下。右上は視点操作で埋まっている */
 .pane-tabs {
   position: absolute;
   right: 8px;
@@ -499,7 +545,7 @@ code {
 
 .street-notice {
   position: absolute;
-  top: 52px;
+  top: 10px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 9;
@@ -511,19 +557,6 @@ code {
   color: var(--text);
   pointer-events: none;
   white-space: nowrap;
-}
-
-/* 順再生・逆再生・再生の長さ・別の道へ は左上にまとめる */
-.street-playback {
-  position: absolute;
-  left: 8px;
-  top: 8px;
-  z-index: 6;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  align-items: center;
-  max-width: calc(100% - 120px);
 }
 
 .street-controls {
@@ -563,21 +596,6 @@ code {
 .street-btn.is-accent { border-color: var(--brand); color: var(--signal); }
 .street-btn.is-on { background: var(--brand); border-color: var(--brand); color: #fff; }
 .street-btn:disabled { opacity: 0.45; cursor: not-allowed; }
-
-.street-select { display: inline-flex; }
-
-.street-select select {
-  background: rgb(7 12 11 / 88%);
-  color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  height: 32px;
-  padding: 0 8px;
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.street-select select option { background: var(--surface-2); color: var(--text); }
 
 .map-wrap { position: relative; width: 100%; height: 100%; }
 .map-canvas { width: 100%; height: 100%; }
@@ -1083,7 +1101,7 @@ code {
 
 .ad-bar {
   flex: 0 0 auto;
-  height: 50px;
+  height: 60px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1094,13 +1112,13 @@ code {
   overflow: hidden;
 }
 
-.ad-bar .ad-frame { width: 320px; height: 50px; }
+.ad-bar .ad-frame { width: 320px; height: 60px; }
 
 .ad-pc { display: none; }
 
 @media (max-width: 899px) {
 
-  :root { --ad-h: 50px; }
+  :root { --ad-h: 60px; }
 
   .stage {
     position: static;
@@ -1150,11 +1168,8 @@ code {
   .readout-cell { padding: 5px 10px 7px; }
   .readout-value { font-size: 17px; }
 
-  .street-playback {
-    left: 6px;
-    top: 6px;
-    max-width: calc(100% - 100px);
-  }
+  .toolbar { padding: 5px 8px; gap: 5px; }
+
   .street-controls { top: 6px; right: 6px; }
 
   .pane-tabs { right: 6px; bottom: 6px; }
@@ -1187,6 +1202,8 @@ code {
   .readout-label { font-size: 9px; }
   .readout-value { font-size: 15px; }
   .readout-cell { padding: 4px 8px 6px; }
+  .toolbar { padding: 4px 8px; }
+  .tool-btn, .tool-select select { height: 28px; }
   .actionbar .primary-btn { min-height: 38px; font-size: 13px; }
   .panel-tabs button { min-height: 30px; font-size: 11px; }
 }
@@ -1201,7 +1218,8 @@ code {
 @media (max-width: 400px) {
   .brand-name { display: none; }
   .readout-value { font-size: 16px; }
-  .street-playback { max-width: calc(100% - 60px); }
+  .tool-btn { padding: 0 9px; font-size: 10px; }
+  .tool-select select { padding: 0 6px; font-size: 10px; }
   .street-btn.is-wide { padding: 0 9px; font-size: 10px; }
 }
 

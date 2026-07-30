@@ -1,13 +1,37 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 import "mapillary-js/dist/mapillary.css";
+
+export type Playback = "none" | "forward" | "reverse";
+
+export interface StreetViewStatus {
+  ready: boolean;
+  playback: Playback;
+  seeking: boolean;
+}
+
+export interface StreetViewHandle {
+  togglePlayback: (direction: "forward" | "reverse") => void;
+  jumpNearby: () => void;
+}
 
 interface Props {
   imageId: string;
   imageUrl?: string;
   compassAngle?: number | null;
   imageMissing?: boolean;
+  /** 再生を自動で止めるまでの秒数。0 なら止めるまで流す */
+  playLength: number;
   onReady?: () => void;
   onMove?: (lat: number, lng: number, imageId: string) => void;
+  /** ツールバーのボタン表示を切り替えるために状態を親へ渡す */
+  onStatusChange?: (status: StreetViewStatus) => void;
   compact?: boolean;
   apiUrl?: string;
 }
@@ -15,34 +39,23 @@ interface Props {
 const MAPILLARY_TOKEN = import.meta.env.VITE_MAPILLARY_TOKEN as string | undefined;
 const LOAD_TIMEOUT_MS = 12_000;
 
-const PLAY_LENGTH_OPTIONS = [
-  { seconds: 3, label: "3秒" },
-  { seconds: 6, label: "6秒" },
-  { seconds: 12, label: "12秒" },
-  { seconds: 30, label: "30秒" },
-  { seconds: 0, label: "止めるまで" },
-];
-
-const PLAY_LENGTH_KEY = "geochase.playLength.v1";
-
 type Phase = "empty" | "loading" | "ready" | "fallback" | "failed";
-type Playback = "none" | "forward" | "reverse";
 
-function loadPlayLength(): number {
-  const raw = Number(localStorage.getItem(PLAY_LENGTH_KEY));
-  return PLAY_LENGTH_OPTIONS.some((o) => o.seconds === raw) ? raw : 6;
-}
-
-export default function StreetView({
-  imageId,
-  imageUrl,
-  compassAngle,
-  imageMissing = false,
-  onReady,
-  onMove,
-  compact = false,
-  apiUrl,
-}: Props) {
+const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
+  {
+    imageId,
+    imageUrl,
+    compassAngle,
+    imageMissing = false,
+    playLength,
+    onReady,
+    onMove,
+    onStatusChange,
+    compact = false,
+    apiUrl,
+  },
+  ref
+) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
   const navDirRef = useRef<any>(null);
@@ -55,7 +68,6 @@ export default function StreetView({
   const [dataLoading, setDataLoading] = useState(false);
   const [movedAway, setMovedAway] = useState(false);
   const [playback, setPlayback] = useState<Playback>("none");
-  const [playLength, setPlayLength] = useState<number>(loadPlayLength);
   const [seeking, setSeeking] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -63,6 +75,8 @@ export default function StreetView({
   onReadyRef.current = onReady;
   const onMoveRef = useRef(onMove);
   onMoveRef.current = onMove;
+  const onStatusRef = useRef(onStatusChange);
+  onStatusRef.current = onStatusChange;
   const playLengthRef = useRef(playLength);
   playLengthRef.current = playLength;
 
@@ -73,9 +87,15 @@ export default function StreetView({
     window.setTimeout(() => setNotice((n) => (n === message ? null : n)), 2600);
   }, []);
 
+  // 値が変わったときだけ親へ通知する。毎回呼ぶと再描画が循環する
+  const statusKeyRef = useRef("");
   useEffect(() => {
-    localStorage.setItem(PLAY_LENGTH_KEY, String(playLength));
-  }, [playLength]);
+    const ready = phase === "ready";
+    const key = `${ready}:${playback}:${seeking}`;
+    if (key === statusKeyRef.current) return;
+    statusKeyRef.current = key;
+    onStatusRef.current?.({ ready, playback, seeking });
+  }, [phase, playback, seeking]);
 
   // basic image coordinates の [0.5, 0.5] が撮影時の正面。読み込み直後は必ずここへ戻す
   const faceForward = useCallback(() => {
@@ -303,8 +323,7 @@ export default function StreetView({
   );
 
   const togglePlayback = useCallback(
-    (e: React.MouseEvent, direction: Playback) => {
-      e.stopPropagation();
+    (direction: "forward" | "reverse") => {
       const viewer = viewerRef.current;
       const ND = navDirRef.current;
       if (!viewer || !ND) return;
@@ -351,58 +370,56 @@ export default function StreetView({
 
   // 問い合わせは1回だけ。条件のゆるめ方はサーバー側に寄せてある。
   // それでも駄目ならビューア自身の前後移動で必ず何か動かす
-  const jumpNearby = useCallback(
-    async (e: React.MouseEvent) => {
-      e.stopPropagation();
-      const current = currentRef.current;
-      if (!current || !current.lat) return;
+  const jumpNearby = useCallback(async () => {
+    const current = currentRef.current;
+    if (!current || !current.lat) return;
 
-      stopPlayback();
-      setSeeking(true);
+    stopPlayback();
+    setSeeking(true);
 
-      try {
-        if (apiUrl) {
-          const params = new URLSearchParams({
-            lat: String(current.lat),
-            lng: String(current.lng),
-            exclude: current.id,
-            car: "1",
-            minKm: "0.05",
-          });
-          if (current.sequenceId) params.set("excludeSeq", current.sequenceId);
+    try {
+      if (apiUrl) {
+        const params = new URLSearchParams({
+          lat: String(current.lat),
+          lng: String(current.lng),
+          exclude: current.id,
+          car: "1",
+          minKm: "0.05",
+        });
+        if (current.sequenceId) params.set("excludeSeq", current.sequenceId);
 
-          const res = await fetch(`${apiUrl}/nearby-image?${params.toString()}`);
-          const data = await res.json();
-          if (data?.found && data.imageId && data.imageId !== current.id) {
-            await viewerRef.current?.moveTo(data.imageId);
-            faceForward();
-            flash("近くの別の地点に移動しました");
-            return;
-          }
+        const res = await fetch(`${apiUrl}/nearby-image?${params.toString()}`);
+        const data = await res.json();
+        if (data?.found && data.imageId && data.imageId !== current.id) {
+          await viewerRef.current?.moveTo(data.imageId);
+          faceForward();
+          flash("近くの別の地点に移動しました");
+          return;
         }
-
-        const ND = navDirRef.current;
-        const viewer = viewerRef.current;
-        if (viewer && ND) {
-          for (const dir of [ND.Next, ND.Prev, ND.TurnRight, ND.TurnLeft]) {
-            if (dir === undefined) continue;
-            try {
-              await viewer.moveDir(dir);
-              faceForward();
-              flash("同じ道を少し進みました");
-              return;
-            } catch {}
-          }
-        }
-        flash("近くにこれ以上の地点がありません");
-      } catch {
-        flash("画像の検索に失敗しました");
-      } finally {
-        setSeeking(false);
       }
-    },
-    [apiUrl, faceForward, flash, stopPlayback]
-  );
+
+      const ND = navDirRef.current;
+      const viewer = viewerRef.current;
+      if (viewer && ND) {
+        for (const dir of [ND.Next, ND.Prev, ND.TurnRight, ND.TurnLeft]) {
+          if (dir === undefined) continue;
+          try {
+            await viewer.moveDir(dir);
+            faceForward();
+            flash("同じ道を少し進みました");
+            return;
+          } catch {}
+        }
+      }
+      flash("近くにこれ以上の地点がありません");
+    } catch {
+      flash("画像の検索に失敗しました");
+    } finally {
+      setSeeking(false);
+    }
+  }, [apiUrl, faceForward, flash, stopPlayback]);
+
+  useImperativeHandle(ref, () => ({ togglePlayback, jumpNearby }), [togglePlayback, jumpNearby]);
 
   if (!MAPILLARY_TOKEN) {
     return (
@@ -468,52 +485,6 @@ export default function StreetView({
       )}
 
       {showControls && (
-        <div className="street-playback">
-          <button
-            type="button"
-            className={`street-btn is-wide${playback === "reverse" ? " is-on" : ""}`}
-            onClick={(e) => togglePlayback(e, "reverse")}
-            aria-pressed={playback === "reverse"}
-            title="来た道を逆再生します"
-          >
-            {playback === "reverse" ? "■ 停止" : "◀◀ 逆再生"}
-          </button>
-          <button
-            type="button"
-            className={`street-btn is-wide${playback === "forward" ? " is-on" : ""}`}
-            onClick={(e) => togglePlayback(e, "forward")}
-            aria-pressed={playback === "forward"}
-            title="道なりに順再生します"
-          >
-            {playback === "forward" ? "■ 停止" : "▶▶ 順再生"}
-          </button>
-          <label className="street-select" onClick={(e) => e.stopPropagation()}>
-            <span className="sr-only">再生の長さ</span>
-            <select
-              value={playLength}
-              onChange={(e) => setPlayLength(Number(e.target.value))}
-              title="再生の長さ"
-            >
-              {PLAY_LENGTH_OPTIONS.map((o) => (
-                <option key={o.seconds} value={o.seconds}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            type="button"
-            className="street-btn is-wide"
-            onClick={jumpNearby}
-            disabled={seeking}
-            title="行き止まりのときは近くの別の地点へ移ります"
-          >
-            {seeking ? "探索中…" : "別の道へ"}
-          </button>
-        </div>
-      )}
-
-      {showControls && (
         <div className="street-controls">
           <button type="button" className="street-btn" onClick={zoomIn} aria-label="拡大">
             ＋
@@ -537,4 +508,6 @@ export default function StreetView({
       )}
     </div>
   );
-}
+});
+
+export default StreetView;

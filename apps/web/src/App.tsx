@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import MapView from "./components/MapView";
-import StreetView from "./components/StreetView";
+import StreetView, { type StreetViewHandle, type StreetViewStatus } from "./components/StreetView";
 import InstallButton from "./components/InstallButton";
 import { API_URL, useGameRoom } from "./lib/useGameRoom";
 import { formatClock, formatDistance, formatScore, proximityMessage } from "./lib/format";
@@ -32,6 +32,21 @@ const TIME_LIMIT_OPTIONS = [
 ];
 
 const ROUND_OPTIONS = [1, 3, 5, 8, 10];
+
+const PLAY_LENGTH_OPTIONS = [
+  { seconds: 3, label: "3秒" },
+  { seconds: 6, label: "6秒" },
+  { seconds: 12, label: "12秒" },
+  { seconds: 30, label: "30秒" },
+  { seconds: 0, label: "止めるまで" },
+];
+
+const PLAY_LENGTH_KEY = "geochase.playLength.v1";
+
+function loadPlayLength(): number {
+  const raw = Number(localStorage.getItem(PLAY_LENGTH_KEY));
+  return PLAY_LENGTH_OPTIONS.some((o) => o.seconds === raw) ? raw : 6;
+}
 
 const GROUP_ORDER = [
   "まとめ",
@@ -157,6 +172,13 @@ export default function App() {
   const initialStage = useRef(loadStage());
   const [stageMode, setStageMode] = useState<StageMode>(initialStage.current.mode);
   const [split, setSplit] = useState(initialStage.current.split);
+  const streetRef = useRef<StreetViewHandle>(null);
+  const [streetStatus, setStreetStatus] = useState<StreetViewStatus>({
+    ready: false,
+    playback: "none",
+    seeking: false,
+  });
+  const [playLength, setPlayLength] = useState(loadPlayLength);
   const stageRef = useRef<HTMLElement>(null);
   const draggingRef = useRef(false);
 
@@ -207,6 +229,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(STAGE_KEY, JSON.stringify({ mode: stageMode, split }));
   }, [stageMode, split]);
+
+  useEffect(() => {
+    localStorage.setItem(PLAY_LENGTH_KEY, String(playLength));
+  }, [playLength]);
 
   useEffect(() => {
     if (!API_URL) return;
@@ -630,6 +656,48 @@ export default function App() {
         </div>
       </div>
 
+      <div className="toolbar" role="group" aria-label="映像の操作">
+        <button
+          type="button"
+          className={`tool-btn${streetStatus.playback === "reverse" ? " is-on" : ""}`}
+          onClick={() => streetRef.current?.togglePlayback("reverse")}
+          disabled={!streetStatus.ready}
+          aria-pressed={streetStatus.playback === "reverse"}
+          title="来た道を逆再生します"
+        >
+          {streetStatus.playback === "reverse" ? "■ 停止" : "◀◀ 逆再生"}
+        </button>
+        <button
+          type="button"
+          className={`tool-btn${streetStatus.playback === "forward" ? " is-on" : ""}`}
+          onClick={() => streetRef.current?.togglePlayback("forward")}
+          disabled={!streetStatus.ready}
+          aria-pressed={streetStatus.playback === "forward"}
+          title="道なりに順再生します"
+        >
+          {streetStatus.playback === "forward" ? "■ 停止" : "▶▶ 順再生"}
+        </button>
+        <label className="tool-select">
+          <span className="sr-only">再生の長さ</span>
+          <select value={playLength} onChange={(e) => setPlayLength(Number(e.target.value))} title="再生の長さ">
+            {PLAY_LENGTH_OPTIONS.map((o) => (
+              <option key={o.seconds} value={o.seconds}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          className="tool-btn"
+          onClick={() => streetRef.current?.jumpNearby()}
+          disabled={!streetStatus.ready || streetStatus.seeking}
+          title="行き止まりのときは近くの別の地点へ移ります"
+        >
+          {streetStatus.seeking ? "探索中…" : "別の道へ"}
+        </button>
+      </div>
+
       <div className="layout">
         <main
           className="stage"
@@ -677,13 +745,16 @@ export default function App() {
               )
             )}
             <StreetView
+              ref={streetRef}
               imageId={displayed.imageId}
               imageUrl={displayed.imageUrl}
               compassAngle={state?.compassAngle ?? null}
               imageMissing={Boolean(state?.imageMissing) && streetSource === "live"}
+              playLength={playLength}
               compact={streetCompact}
               apiUrl={API_URL}
               onMove={handleStreetMove}
+              onStatusChange={setStreetStatus}
             />
           </section>
 
