@@ -20,7 +20,7 @@
     <meta property="og:image" content="/icon-512.png" />
     <meta name="twitter:card" content="summary" />
 
-    <link rel="preconnect" href="https://adm.shinobi.jp" crossorigin />
+    <link rel="preconnect" href="https://px.a8.net" crossorigin />
 
     <meta name="google-site-verification" content="oHmE_f6ogd0ZE4WmHBdncsZGod_A0JaotcU5iLCqmXA" />
 
@@ -36,35 +36,10 @@
     </noscript>
 
     <!--
-      広告は専用HTMLをiframeで読み込む。
-      admaxのタグは document.write で中身を書き込むため、SPA本体のHTMLに
-      直接置くとReactのマウントやService Workerの介入と競合して描画されないことがある。
-      iframeの中の文書は読み込み時に解析されるので document.write が必ず効く。
-      スマホは画面最下部の320x50、PCは右下の300x250。
+      広告は画面に固定せず、パネル（設定・順位・ヒント・記録）を開いたときに
+      本文の下へ出す方式にした。実装は src/components/AdSlot.tsx と src/lib/ads.ts。
+      画面を占有しないぶん、地図とストリートビューを広く使える。
     -->
-    <div class="ad-bar">
-      <iframe
-        class="ad-frame"
-        src="/ads/sp.html"
-        title="広告"
-        width="320"
-        height="50"
-        scrolling="no"
-        loading="eager"
-      ></iframe>
-    </div>
-
-    <div class="ad-pc">
-      <iframe
-        class="ad-frame"
-        src="/ads/pc.html"
-        title="広告"
-        width="300"
-        height="250"
-        scrolling="no"
-        loading="eager"
-      ></iframe>
-    </div>
 
     <script type="module" src="/src/main.tsx"></script>
   </body>

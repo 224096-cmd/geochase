@@ -1111,33 +1111,50 @@ code {
   pointer-events: none;
 }
 
-/* 広告は同一オリジンのiframe(/ads/*.html)。実寸を固定で確保する */
-.ad-frame {
+/* 広告はパネル本文の下に置く。画面を占有しないので地図とSVを広く使える。
+   ステマ規制に合わせて必ず「広告」表記を添える */
+.ad-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 10px 12px 14px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.ad-slot-label {
+  align-self: flex-start;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 2px 5px;
+  line-height: 1;
+}
+
+.ad-slot-link { display: block; max-width: 100%; }
+
+.ad-slot img {
   display: block;
   border: 0;
-  background: transparent;
-  overflow: hidden;
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
 }
 
-/* スマホ広告は画面の1番下に実寸(320x50)ぴったりで置く。
-   余白・境界線をなくし、その分だけ地図とストリートビューを広くする */
-.ad-bar {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  background: var(--ink);
-  padding: 0 0 env(safe-area-inset-bottom);
-  overflow: hidden;
+/* 素材の幅が100〜320pxと幅広いので、切り替えで高さが跳ねないよう下限をそろえる */
+.ad-slot-banner { min-height: 92px; justify-content: center; }
+
+.ad-slot-beacon {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
-
-.ad-bar .ad-frame { width: 320px; height: 50px; }
-
-.ad-pc { display: none; }
 
 @media (max-width: 899px) {
-
-  :root { --ad-h: 50px; }
 
   .stage {
     position: static;
@@ -1245,26 +1262,6 @@ code {
 
 @media (min-width: 900px) {
 
-  .ad-bar { display: none; }
-
-  .ad-pc {
-    display: block;
-    position: fixed;
-    right: 10px;
-    bottom: 10px;
-
-    width: 300px;
-    height: 250px;
-    /* Leafletのコントロール(z-index:800)より前に出す */
-    z-index: 1500;
-    background: var(--surface);
-    border: 1px solid var(--line-soft);
-    border-radius: var(--radius-sm);
-    overflow: hidden;
-  }
-
-  .ad-pc .ad-frame { width: 300px; height: 250px; }
-
   .layout { flex-direction: row; }
 
   .stage {
@@ -1352,8 +1349,6 @@ code {
     flex-direction: column;
     min-height: 0;
     border-left: 1px solid var(--line-soft);
-    /* 右下に固定した300x250の広告と重ならないよう空ける */
-    padding-bottom: 272px;
   }
 
   .panel-tabs { order: -1; border-top: none; border-bottom: 1px solid var(--line-soft); }
@@ -1410,12 +1405,6 @@ code {
 .app.is-immersive .toolbar,
 .app.is-immersive .sidebar,
 .app.is-immersive .stage-modes {
-  display: none;
-}
-
-/* 広告は #root の外にあるので body 側のクラスで隠す */
-body.is-immersive .ad-bar,
-body.is-immersive .ad-pc {
   display: none;
 }
 

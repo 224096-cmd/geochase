@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import MapView from "./components/MapView";
 import StreetView, { type StreetViewHandle, type StreetViewStatus } from "./components/StreetView";
+import AdSlot from "./components/AdSlot";
 import InstallButton from "./components/InstallButton";
 import { API_URL, useGameRoom } from "./lib/useGameRoom";
 import { formatClock, formatDistance, formatScore, proximityMessage } from "./lib/format";
@@ -1334,6 +1335,11 @@ export default function App() {
                 </div>
               </section>
             )}
+
+            {/* 広告はパネルを開いたときだけ本文の下に出す。
+                key に panel を渡しているので、タブを切り替えるたびに次の素材へ進む。
+                プレイ中に開くヒントだけは邪魔にならない小さい枠にする */}
+            {panel && <AdSlot key={panel} variant={panel === "hints" ? "banner" : "rect"} />}
           </div>
 
           <nav className="panel-tabs">
