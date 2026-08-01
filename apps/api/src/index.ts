@@ -77,7 +77,7 @@ export default {
 
       if (!result) {
         return Response.json(
-          { found: false, error: "この付近に自動車から撮られた画像はありません" },
+          { found: false, error: "この付近に車から撮影された360°画像はありません" },
           { headers }
         );
       }

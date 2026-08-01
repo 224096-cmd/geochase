@@ -20,7 +20,7 @@
   --radius-sm: 8px;
 
   --ad-h: 0px;
-  --pip: 78px;
+  --pip: 92px;
   --tap: 44px;
 
   --split-street: 0.56;
@@ -347,6 +347,9 @@ code {
 .tool-btn.is-on { background: var(--brand); border-color: var(--brand); color: #fff; }
 .tool-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+/* 全画面ボタンはツールバーの右端へ */
+.tool-btn-end { margin-inline-start: auto; }
+
 .tool-select { flex: 0 0 auto; display: inline-flex; }
 
 .tool-select select {
@@ -421,21 +424,22 @@ code {
 .stage-overlay strong { font-size: 15px; }
 .stage-overlay span { font-size: 12px; color: var(--muted); max-width: 30ch; line-height: 1.6; }
 
+/* 小窓のラベル。文字が密集しないよう1語＋拡大マークだけにする */
 .pip-label {
   position: absolute;
-  top: 6px;
-  left: 6px;
+  top: 4px;
+  left: 4px;
   z-index: 6;
-  display: flex;
-  align-items: center;
-  gap: 4px;
   background: rgb(7 12 11 / 85%);
   border: 1px solid var(--line);
   color: var(--text);
   font-size: 10px;
-  padding: 3px 8px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 2px 7px;
   border-radius: 999px;
   pointer-events: none;
+  white-space: nowrap;
 }
 
 /* 現地／下見タブは右下。右上は視点操作で埋まっている */
@@ -474,25 +478,25 @@ code {
 
 .street-canvas { width: 100%; height: 100%; }
 
+/* 内蔵の再生UI（速度・タイムライン）と出典表示は画面に重ねない。
+   再生操作は画面外のツールバー、出典は「記録」タブに常設している */
+.mapillary-sequence-container,
+.mapillary-attribution-container {
+  display: none !important;
+}
+
+/* 小窓のときは矢印・コンパスも隠して映像だけを見せる（文字・記号の密集を防ぐ） */
+.street-wrap.is-compact .mapillary-bearing-indicator-container,
+.street-wrap.is-compact .mapillary-direction-perspective {
+  display: none !important;
+}
+
 .street-fallback {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
-}
-
-.street-credit {
-  position: absolute;
-  right: 6px;
-  bottom: 6px;
-  z-index: 6;
-  background: rgb(7 12 11 / 80%);
-  color: var(--muted);
-  font-size: 9px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  pointer-events: none;
 }
 
 .street-message {
@@ -600,24 +604,27 @@ code {
 .map-wrap { position: relative; width: 100%; height: 100%; }
 .map-canvas { width: 100%; height: 100%; }
 
-.leaflet-container { background: #0b1210; font-family: var(--font-ui); }
+/* ベクター地図（bright）と地理院淡色はどちらも明るい配色なので背景も明るく */
+.leaflet-container { background: #e6e4df; font-family: var(--font-ui); }
 
-.leaflet-control-attribution {
-  background: rgb(7 12 11 / 78%) !important;
-  color: var(--muted) !important;
-  font-size: 9px !important;
-  padding: 1px 5px !important;
-}
+/* 出典は記録タブへ移設済み。地図上には一切出さない */
+.leaflet-control-attribution { display: none !important; }
 
-.leaflet-control-attribution a { color: var(--muted) !important; }
-
+/* Googleマップ風の白いズームボタン（右下） */
 .leaflet-control-zoom a {
-  background: rgb(7 12 11 / 88%) !important;
-  color: var(--text) !important;
-  border-color: var(--line) !important;
+  background: #fff !important;
+  color: #444 !important;
+  border-color: #dadce0 !important;
   width: 34px !important;
   height: 34px !important;
   line-height: 32px !important;
+}
+
+.leaflet-control-zoom a:hover { background: #f1f3f4 !important; }
+
+.leaflet-bottom .leaflet-control-zoom {
+  margin-bottom: 22px;
+  margin-right: 8px;
 }
 
 .leaflet-maplibre-gl-pane canvas { outline: none; }
@@ -637,12 +644,21 @@ code {
 .map-wrap.is-compact .leaflet-control-container,
 .map-wrap.is-compact .map-controls,
 .map-wrap.is-compact .map-coords,
-.map-wrap.is-compact .map-credit-btn,
-.map-wrap.is-compact .map-credit-panel,
+.map-wrap.is-compact .map-loading,
 .map-wrap.is-compact .map-range-note,
 .map-wrap.is-compact .map-lock-note {
   display: none;
 }
+
+/* 記録タブに常設する出典・クレジット一覧 */
+.credit-list {
+  font-size: 10px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+.credit-list p { margin: 0 0 7px; word-break: break-word; }
+.credit-list p:last-child { margin-bottom: 0; }
 
 .map-controls {
   position: absolute;
@@ -656,19 +672,21 @@ code {
 }
 
 .map-btn {
-  background: rgb(7 12 11 / 90%);
-  color: var(--text);
-  border: 1px solid var(--line);
+  background: rgb(255 255 255 / 96%);
+  color: #3c4043;
+  border: 1px solid #dadce0;
   border-radius: 999px;
   padding: 8px 13px;
   min-height: 36px;
   font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 20%);
 }
 
-.map-btn[aria-pressed="true"] { border-color: var(--brand); color: var(--signal); }
-.map-btn.is-accent { border-color: var(--brand); color: var(--signal); }
+.map-btn[aria-pressed="true"] { border-color: var(--brand); color: var(--brand); }
+.map-btn.is-accent { border-color: var(--brand); color: var(--brand); }
 .map-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .map-coords {
@@ -680,77 +698,44 @@ code {
   flex-direction: column;
   align-items: flex-start;
   gap: 1px;
-  background: rgb(7 12 11 / 92%);
-  border: 1px solid var(--line);
+  background: rgb(255 255 255 / 96%);
+  border: 1px solid #dadce0;
   border-radius: var(--radius-sm);
   padding: 6px 11px;
   cursor: pointer;
   text-align: left;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 18%);
 }
 
-.map-coords-label { font-size: 9px; letter-spacing: 0.1em; color: var(--muted); }
+.map-coords-label { font-size: 9px; letter-spacing: 0.1em; color: #70757a; }
 
 .map-coords-value {
   font-family: var(--font-data);
   font-variant-numeric: tabular-nums;
   font-size: 13px;
-  color: var(--text);
+  color: #202124;
 }
 
-.map-coords-copy { font-size: 9px; color: var(--signal); }
+.map-coords-copy { font-size: 9px; color: var(--brand); }
 
 .map-loading {
   position: absolute;
   top: 8px;
-  right: 52px;
+  right: 8px;
   z-index: 500;
   display: flex;
   align-items: center;
   gap: 7px;
-  background: rgb(7 12 11 / 90%);
-  border: 1px solid var(--line);
+  background: rgb(255 255 255 / 95%);
+  border: 1px solid #dadce0;
   border-radius: 999px;
   padding: 5px 12px 5px 8px;
   font-size: 11px;
-  color: var(--muted);
+  color: #70757a;
   pointer-events: none;
 }
 
-.map-loading .street-spinner { width: 14px; height: 14px; }
-
-.map-credit-btn {
-  position: absolute;
-  right: 8px;
-  bottom: 22px;
-  z-index: 500;
-  background: rgb(7 12 11 / 90%);
-  color: var(--muted);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 5px 11px;
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.map-credit-panel {
-  position: absolute;
-  right: 8px;
-  bottom: 56px;
-  z-index: 501;
-  max-width: min(88%, 420px);
-  max-height: 46%;
-  overflow-y: auto;
-  background: rgb(7 12 11 / 96%);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: 10px 12px;
-  font-size: 10px;
-  line-height: 1.65;
-  color: var(--muted);
-}
-
-.map-credit-panel p { margin: 0 0 7px; word-break: break-word; }
-.map-credit-panel p:last-child { margin-bottom: 0; }
+.map-loading .street-spinner { width: 14px; height: 14px; border-color: #dadce0; border-top-color: var(--brand); }
 
 .map-range-note {
   position: absolute;
@@ -1099,31 +1084,30 @@ code {
   overflow: hidden;
 }
 
+/* スマホ広告は画面の1番下に実寸(320x50)ぴったりで置く。
+   余白・境界線をなくし、その分だけ地図とストリートビューを広くする */
 .ad-bar {
   flex: 0 0 auto;
-  height: 60px;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   background: var(--ink);
-  border-top: 1px solid var(--line-soft);
-  padding-bottom: env(safe-area-inset-bottom);
-  box-sizing: content-box;
+  padding: 0 0 env(safe-area-inset-bottom);
   overflow: hidden;
 }
 
-.ad-bar .ad-frame { width: 320px; height: 60px; }
+.ad-bar .ad-frame { width: 320px; height: 50px; }
 
 .ad-pc { display: none; }
 
 @media (max-width: 899px) {
 
-  :root { --ad-h: 60px; }
+  :root { --ad-h: 50px; }
 
   .stage {
     position: static;
     display: flex;
-    padding: 4px;
+    padding: 3px;
   }
 
   .stage[data-focus="street"] .pane-street,
@@ -1135,8 +1119,8 @@ code {
   .stage[data-focus="street"] .pane-map,
   .stage[data-focus="map"] .pane-street {
     position: absolute;
-    left: 4px;
-    bottom: 4px;
+    left: 3px;
+    bottom: 3px;
     width: var(--pip);
     height: var(--pip);
     z-index: 5;
@@ -1150,12 +1134,12 @@ code {
   }
 
   .sidebar {
-    min-height: calc(var(--pip) + 8px);
-    padding: 4px 4px 4px calc(var(--pip) + 10px);
+    min-height: calc(var(--pip) + 6px);
+    padding: 3px 3px 3px calc(var(--pip) + 8px);
     display: flex;
     flex-direction: column;
     justify-content: center;
-    gap: 5px;
+    gap: 4px;
     border-top: none;
   }
 
@@ -1164,11 +1148,12 @@ code {
   .actionbar { padding: 0; border-top: none; }
   .actionbar .primary-btn { min-height: 42px; }
 
-  .topbar { min-height: 44px; padding: 4px 10px; }
-  .readout-cell { padding: 5px 10px 7px; }
-  .readout-value { font-size: 17px; }
+  .topbar { min-height: 40px; padding: 3px 10px; }
+  .readout-cell { padding: 4px 10px 6px; }
+  .readout-value { font-size: 16px; }
 
-  .toolbar { padding: 5px 8px; gap: 5px; }
+  .toolbar { padding: 4px 8px; gap: 5px; }
+  .tool-btn, .tool-select select { height: 30px; }
 
   .street-controls { top: 6px; right: 6px; }
 
@@ -1177,7 +1162,7 @@ code {
   .map-coords { bottom: 62px; padding: 5px 9px; }
   .map-coords-value { font-size: 12px; }
 
-  .toast { bottom: calc(var(--ad-h) + 110px); }
+  .toast { bottom: calc(var(--ad-h) + 104px); }
 
   .app:not([data-panel="none"]) .panel-body {
     display: block;
@@ -1197,7 +1182,7 @@ code {
 }
 
 @media (max-width: 899px) and (max-height: 720px) {
-  :root { --pip: 68px; }
+  :root { --pip: 80px; }
   .topbar { min-height: 40px; }
   .readout-label { font-size: 9px; }
   .readout-value { font-size: 15px; }
@@ -1307,10 +1292,9 @@ code {
     pointer-events: none;
   }
 
-  /* 小窓と重なる位置の操作を左へ逃がす */
-  .stage[data-mode="map"] .map-credit-btn,
-  .stage[data-mode="map"] .map-credit-panel {
-    right: 292px;
+  /* 小窓と重なる位置のズームボタンを左へ逃がす */
+  .stage[data-mode="map"] .leaflet-bottom.leaflet-right .leaflet-control-zoom {
+    margin-right: 292px;
   }
 
   .stage-modes {
@@ -1382,6 +1366,108 @@ code {
 }
 
 .stage-modes.is-inline button { flex: 1; min-height: 38px; font-size: 12px; }
+
+/* ============================================================
+   全画面モード（映像と地図だけ。必要なボタンは画面端に小さく表示）
+   ============================================================ */
+.app.is-immersive .topbar,
+.app.is-immersive .readout,
+.app.is-immersive .toolbar,
+.app.is-immersive .sidebar,
+.app.is-immersive .stage-modes {
+  display: none;
+}
+
+/* 広告は #root の外にあるので body 側のクラスで隠す */
+body.is-immersive .ad-bar,
+body.is-immersive .ad-pc {
+  display: none;
+}
+
+.app.is-immersive { padding-top: 0; }
+.app.is-immersive .stage { padding: 0; }
+.app.is-immersive .pane { border-radius: 0; border: none; }
+
+/* 画面端のボタンは小さく */
+.app.is-immersive .street-btn { width: 30px; height: 30px; font-size: 13px; }
+.app.is-immersive .street-btn.is-wide { width: auto; height: 26px; padding: 0 9px; font-size: 10px; }
+.app.is-immersive .map-btn { min-height: 28px; padding: 4px 9px; font-size: 10px; }
+.app.is-immersive .map-controls { left: 6px; bottom: 8px; gap: 4px; }
+.app.is-immersive .leaflet-bottom .leaflet-control-zoom { margin-bottom: 8px; margin-right: 6px; }
+.app.is-immersive .leaflet-control-zoom a {
+  width: 28px !important;
+  height: 28px !important;
+  line-height: 26px !important;
+}
+
+.hud-chip {
+  position: absolute;
+  top: calc(env(safe-area-inset-top) + 8px);
+  left: 8px;
+  z-index: 1350;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgb(7 12 11 / 88%);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--text);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.hud-round { color: var(--muted); }
+
+.hud-score,
+.hud-timer {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.hud-score { color: var(--signal); }
+.hud-chip[data-urgency="warn"] .hud-timer { color: var(--warn); }
+.hud-chip[data-urgency="critical"] .hud-timer { color: var(--hot); }
+
+.hud-exit {
+  position: absolute;
+  top: calc(env(safe-area-inset-top) + 8px);
+  right: 8px;
+  z-index: 1350;
+  background: rgb(7 12 11 / 88%);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 12px;
+  min-height: 30px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.hud-action {
+  position: absolute;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom) + 10px);
+  transform: translateX(-50%);
+  z-index: 1350;
+  max-width: min(88vw, 420px);
+  min-height: 40px;
+  padding: 8px 18px;
+  font-size: 13px;
+  white-space: normal;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+}
+
+@media (max-width: 899px) {
+  /* 全画面時は中央下の回答ボタンと重ならないよう小窓を少し持ち上げる */
+  .app.is-immersive .stage[data-focus="street"] .pane-map,
+  .app.is-immersive .stage[data-focus="map"] .pane-street {
+    left: 6px;
+    bottom: calc(env(safe-area-inset-bottom) + 60px);
+  }
+}
 
 @keyframes spin { to { transform: rotate(360deg); } }
 

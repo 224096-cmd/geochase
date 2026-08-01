@@ -18,6 +18,10 @@ export interface StreetViewStatus {
 
 export interface StreetViewHandle {
   togglePlayback: (direction: "forward" | "reverse") => void;
+  /** 1コマだけ前後に移動する（画面外ボタン用） */
+  step: (direction: "forward" | "reverse") => void;
+  /** 再生速度 0〜1（Mapillaryの内部速度） */
+  setSpeed: (speed: number) => void;
   jumpNearby: () => void;
 }
 
@@ -28,6 +32,8 @@ interface Props {
   imageMissing?: boolean;
   /** 再生を自動で止めるまでの秒数。0 なら止めるまで流す */
   playLength: number;
+  /** 再生速度 0〜1。初期値と変更時の反映は親から setSpeed でも行う */
+  playSpeed: number;
   onReady?: () => void;
   onMove?: (lat: number, lng: number, imageId: string) => void;
   /** ツールバーのボタン表示を切り替えるために状態を親へ渡す */
@@ -48,6 +54,7 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
     compassAngle,
     imageMissing = false,
     playLength,
+    playSpeed,
     onReady,
     onMove,
     onStatusChange,
@@ -79,6 +86,8 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
   onStatusRef.current = onStatusChange;
   const playLengthRef = useRef(playLength);
   playLengthRef.current = playLength;
+  const playSpeedRef = useRef(playSpeed);
+  playSpeedRef.current = playSpeed;
 
   const zoomRef = useRef(0);
 
@@ -115,6 +124,17 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
     }
   }, []);
 
+  // Mapillary内部の再生速度(0〜1)を反映する。公開APIが無いので
+  // バンドル済みバージョンの内部サービスを直接叩く。失敗しても再生自体は動く
+  const applySpeed = useCallback((speed: number) => {
+    playSpeedRef.current = speed;
+    try {
+      (viewerRef.current as any)?._navigator?.playService?.setSpeed?.(
+        Math.max(0, Math.min(1, speed))
+      );
+    } catch {}
+  }, []);
+
   useEffect(() => {
     if (!MAPILLARY_TOKEN || !containerRef.current) return;
     let disposed = false;
@@ -130,10 +150,14 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
           component: {
             cover: false,
             direction: true,
-            sequence: true,
+            // 内蔵の再生UI（再生速度・タイムライン）は画面に出さない。
+            // visible:false ならコンポーネント自体は生きていて play/stop は使える。
+            // 操作は画面外のツールバー（App側）から行う
+            sequence: { visible: false },
             bearing: true,
-            // Mapillaryの画像はCC BY-SA。出所表示は消さない
-            attribution: true,
+            // 出典表示はゲーム中の画面には出さず、「記録」タブに常設する。
+            // Mapillary(CC BY-SA)のクレジットは credits.ts 経由で必ず表示している
+            attribution: false,
             zoom: false,
             pointer: { dragPan: true, scrollZoom: true, touchZoom: true },
             keyboard: true,
@@ -171,6 +195,7 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
         } catch {}
 
         viewerRef.current = viewer;
+        applySpeed(playSpeedRef.current);
       })
       .catch((err) => {
         console.error("Mapillary module load failed", err);
@@ -250,6 +275,11 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
     }, 260);
     return () => window.clearTimeout(t);
   }, [compact]);
+
+  // 親からの速度変更を反映
+  useEffect(() => {
+    applySpeed(playSpeed);
+  }, [playSpeed, applySpeed]);
 
   useEffect(
     () => () => {
@@ -343,6 +373,7 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
 
       try {
         clearPlayTimer();
+        applySpeed(playSpeedRef.current);
         seq.configure({ direction: direction === "forward" ? ND.Next : ND.Prev });
         seq.play?.();
         setPlayback(direction);
@@ -365,7 +396,23 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
         flash("この地点では再生できません");
       }
     },
-    [clearPlayTimer, flash, playback, stopPlayback]
+    [applySpeed, clearPlayTimer, flash, playback, stopPlayback]
+  );
+
+  // 1コマだけ前後へ。画面外のツールバーから使う
+  const step = useCallback(
+    async (direction: "forward" | "reverse") => {
+      const viewer = viewerRef.current;
+      const ND = navDirRef.current;
+      if (!viewer || !ND) return;
+      stopPlayback();
+      try {
+        await viewer.moveDir(direction === "forward" ? ND.Next : ND.Prev);
+      } catch {
+        flash(direction === "forward" ? "この先に画像がありません" : "この後ろに画像がありません");
+      }
+    },
+    [flash, stopPlayback]
   );
 
   // 問い合わせは1回だけ。条件のゆるめ方はサーバー側に寄せてある。
@@ -384,6 +431,7 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
           lng: String(current.lng),
           exclude: current.id,
           car: "1",
+          pano: "1",
           minKm: "0.05",
         });
         if (current.sequenceId) params.set("excludeSeq", current.sequenceId);
@@ -419,7 +467,11 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
     }
   }, [apiUrl, faceForward, flash, stopPlayback]);
 
-  useImperativeHandle(ref, () => ({ togglePlayback, jumpNearby }), [togglePlayback, jumpNearby]);
+  useImperativeHandle(
+    ref,
+    () => ({ togglePlayback, step, setSpeed: applySpeed, jumpNearby }),
+    [togglePlayback, step, applySpeed, jumpNearby]
+  );
 
   if (!MAPILLARY_TOKEN) {
     return (
@@ -435,7 +487,7 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
   const showControls = phase === "ready" && !compact;
 
   return (
-    <div className="street-wrap">
+    <div className={`street-wrap${compact ? " is-compact" : ""}`}>
       <div
         ref={containerRef}
         className="street-canvas"
@@ -445,10 +497,7 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
       {(dataLoading || seeking) && phase === "ready" && <span className="street-progress" aria-hidden="true" />}
 
       {phase === "fallback" && imageUrl && (
-        <>
-          <img className="street-fallback" src={imageUrl} alt="現在地のストリート画像" />
-          <span className="street-credit">© Mapillary（CC BY-SA）</span>
-        </>
+        <img className="street-fallback" src={imageUrl} alt="現在地のストリート画像" />
       )}
 
       {phase === "loading" && (
@@ -463,7 +512,7 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
           {imageMissing ? (
             <>
               <p className="street-message-title">この地点の写真が見つかりませんでした</p>
-              <p>自動車から撮られた画像が周辺にありません。ヒントと地図で推理してください。</p>
+              <p>車から撮影された360°画像が周辺にありません。ヒントと地図で推理してください。</p>
             </>
           ) : (
             <p>スタートすると、ここに現地の風景が出ます</p>

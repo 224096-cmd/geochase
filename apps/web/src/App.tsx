@@ -4,6 +4,7 @@ import StreetView, { type StreetViewHandle, type StreetViewStatus } from "./comp
 import InstallButton from "./components/InstallButton";
 import { API_URL, useGameRoom } from "./lib/useGameRoom";
 import { formatClock, formatDistance, formatScore, proximityMessage } from "./lib/format";
+import { getCredits } from "./lib/credits";
 import type { GuessResult, LatLng, Mode, StageMode, StartOptions } from "./lib/types";
 
 type PanelKey = "settings" | "hints" | "rank" | "history" | null;
@@ -46,6 +47,20 @@ const PLAY_LENGTH_KEY = "geochase.playLength.v1";
 function loadPlayLength(): number {
   const raw = Number(localStorage.getItem(PLAY_LENGTH_KEY));
   return PLAY_LENGTH_OPTIONS.some((o) => o.seconds === raw) ? raw : 6;
+}
+
+// Mapillaryの内部再生速度（0〜1）
+const SPEED_OPTIONS = [
+  { value: 0.2, label: "遅い" },
+  { value: 0.45, label: "ふつう" },
+  { value: 0.8, label: "速い" },
+];
+
+const PLAY_SPEED_KEY = "geochase.playSpeed.v1";
+
+function loadPlaySpeed(): number {
+  const raw = Number(localStorage.getItem(PLAY_SPEED_KEY));
+  return SPEED_OPTIONS.some((o) => o.value === raw) ? raw : 0.45;
 }
 
 const GROUP_ORDER = [
@@ -179,6 +194,9 @@ export default function App() {
     seeking: false,
   });
   const [playLength, setPlayLength] = useState(loadPlayLength);
+  const [playSpeed, setPlaySpeed] = useState(loadPlaySpeed);
+  // 全画面モード。映像と地図だけを表示し、必要なボタンは画面端に小さく出す
+  const [immersive, setImmersive] = useState(false);
   const stageRef = useRef<HTMLElement>(null);
   const draggingRef = useRef(false);
 
@@ -233,6 +251,39 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(PLAY_LENGTH_KEY, String(playLength));
   }, [playLength]);
+
+  useEffect(() => {
+    localStorage.setItem(PLAY_SPEED_KEY, String(playSpeed));
+  }, [playSpeed]);
+
+  // 広告(iframe)は #root の外にあるため、bodyのクラスで隠す
+  useEffect(() => {
+    document.body.classList.toggle("is-immersive", immersive);
+    return () => document.body.classList.remove("is-immersive");
+  }, [immersive]);
+
+  // ブラウザの全画面が(Escや戻る操作で)解除されたら、こちらのモードも揃えて戻す
+  useEffect(() => {
+    const onFsChange = () => {
+      if (!document.fullscreenElement) setImmersive(false);
+    };
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => document.removeEventListener("fullscreenchange", onFsChange);
+  }, []);
+
+  const toggleImmersive = useCallback(() => {
+    setImmersive((v) => {
+      const next = !v;
+      if (next) {
+        setPanel(null);
+        // 対応ブラウザでは本当の全画面にする。iOS Safariなど非対応でもCSSだけで成立する
+        document.documentElement.requestFullscreen?.().catch(() => {});
+      } else if (document.fullscreenElement) {
+        document.exitFullscreen?.().catch(() => {});
+      }
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     if (!API_URL) return;
@@ -368,7 +419,7 @@ export default function App() {
     if (!guessPin) return;
     setExploreLoading(true);
     try {
-      const res = await fetch(`${API_URL}/nearby-image?lat=${guessPin.lat}&lng=${guessPin.lng}&car=1`);
+      const res = await fetch(`${API_URL}/nearby-image?lat=${guessPin.lat}&lng=${guessPin.lng}&car=1&pano=1`);
       const data = await res.json();
       if (data?.found && data.imageId) {
         setExplore({ imageId: data.imageId, imageUrl: data.imageUrl ?? "" });
@@ -376,7 +427,7 @@ export default function App() {
         if (isWide) setStageMode("split");
         else setFocusedPane("street");
       } else {
-        showToast(data?.error ?? "この付近には自動車から撮られた画像がありません");
+        showToast(data?.error ?? "この付近には車から撮影された360°画像がありません");
       }
     } catch {
       showToast("画像の検索に失敗しました");
@@ -509,11 +560,15 @@ export default function App() {
         setStageMode((m) => (m === "street" ? "split" : "street"));
       }
       if (e.key.toLowerCase() === "h" && state?.status === "running") requestHint();
-      if (e.key === "Escape") setPanel(null);
+      if (e.key.toLowerCase() === "f") toggleImmersive();
+      if (e.key === "Escape") {
+        if (immersive) setImmersive(false);
+        else setPanel(null);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [guessPin, isWide, state?.status, submitGuess, requestHint]);
+  }, [guessPin, isWide, state?.status, submitGuess, requestHint, toggleImmersive, immersive]);
 
   const isRunning = state?.status === "running";
   const isReveal = state?.status === "reveal";
@@ -551,6 +606,63 @@ export default function App() {
 
   const urgency = countdown ? (countdown.ratio < 0.15 ? "critical" : countdown.ratio < 0.4 ? "warn" : "calm") : "calm";
 
+  // 「回答する」等のメイン操作。通常の下部バーと全画面モードのHUDで同じ挙動を共有する
+  const primaryAction = useMemo(() => {
+    if (isReveal) {
+      return {
+        onClick: nextRound,
+        disabled: isMoving || !isHost,
+        title: isHost ? undefined : "ホストだけが次のラウンドへ進められます",
+        label: isMoving
+          ? "次の地点を探しています…"
+          : isHost
+          ? "次のラウンドへ"
+          : "ホストが次に進めるのを待っています",
+      };
+    }
+    if (isFinished) {
+      return {
+        onClick: handleStart,
+        disabled: busy || !isHost,
+        title: undefined as string | undefined,
+        label: isHost
+          ? `もう一度あそぶ（あなた ${formatScore(myRank?.total ?? 0)}点）`
+          : `あなた ${formatScore(myRank?.total ?? 0)}点（ホスト待ち）`,
+      };
+    }
+    return {
+      onClick: submitGuess,
+      disabled: !guessPin || !isRunning || isMoving || waitingOthers,
+      title: undefined as string | undefined,
+      label: isMoving
+        ? "逃走者が移動中…"
+        : waitingOthers
+        ? `他の人を待っています（${answered}/${players}人）`
+        : !isRunning
+        ? isHost
+          ? "スタートすると回答できます"
+          : "ホストの開始を待っています"
+        : guessPin
+        ? "ここだと回答する"
+        : "地図をタップしてピンを置く",
+    };
+  }, [
+    isReveal,
+    isFinished,
+    isMoving,
+    isHost,
+    busy,
+    myRank,
+    guessPin,
+    isRunning,
+    waitingOthers,
+    answered,
+    players,
+    nextRound,
+    handleStart,
+    submitGuess,
+  ]);
+
   const streetCompact = isWide ? stageMode === "map" : focusedPane !== "street";
   const mapCompact = isWide ? stageMode === "street" : focusedPane !== "map";
 
@@ -568,7 +680,7 @@ export default function App() {
   }
 
   return (
-    <div className="app" data-panel={panel ?? "none"}>
+    <div className={`app${immersive ? " is-immersive" : ""}`} data-panel={panel ?? "none"}>
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true" />
@@ -659,6 +771,15 @@ export default function App() {
       <div className="toolbar" role="group" aria-label="映像の操作">
         <button
           type="button"
+          className="tool-btn"
+          onClick={() => streetRef.current?.step("reverse")}
+          disabled={!streetStatus.ready}
+          title="1コマだけ戻ります"
+        >
+          ｜◀
+        </button>
+        <button
+          type="button"
           className={`tool-btn${streetStatus.playback === "reverse" ? " is-on" : ""}`}
           onClick={() => streetRef.current?.togglePlayback("reverse")}
           disabled={!streetStatus.ready}
@@ -677,12 +798,35 @@ export default function App() {
         >
           {streetStatus.playback === "forward" ? "■ 停止" : "▶▶ 順再生"}
         </button>
+        <button
+          type="button"
+          className="tool-btn"
+          onClick={() => streetRef.current?.step("forward")}
+          disabled={!streetStatus.ready}
+          title="1コマだけ進みます"
+        >
+          ▶｜
+        </button>
         <label className="tool-select">
           <span className="sr-only">再生の長さ</span>
           <select value={playLength} onChange={(e) => setPlayLength(Number(e.target.value))} title="再生の長さ">
             {PLAY_LENGTH_OPTIONS.map((o) => (
               <option key={o.seconds} value={o.seconds}>
                 {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="tool-select">
+          <span className="sr-only">再生の速さ</span>
+          <select
+            value={playSpeed}
+            onChange={(e) => setPlaySpeed(Number(e.target.value))}
+            title="再生の速さ"
+          >
+            {SPEED_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                速さ: {o.label}
               </option>
             ))}
           </select>
@@ -695,6 +839,14 @@ export default function App() {
           title="行き止まりのときは近くの別の地点へ移ります"
         >
           {streetStatus.seeking ? "探索中…" : "別の道へ"}
+        </button>
+        <button
+          type="button"
+          className="tool-btn tool-btn-end"
+          onClick={toggleImmersive}
+          title="映像と地図だけの全画面表示に切り替えます（F）"
+        >
+          ⛶ 全画面
         </button>
       </div>
 
@@ -717,7 +869,7 @@ export default function App() {
             aria-label="ストリート画像"
           >
             {streetCompact ? (
-              <span className="pip-label">タップで映像を大きく</span>
+              <span className="pip-label">映像 ⤢</span>
             ) : (
               explore && (
                 <div className="pane-tabs">
@@ -751,6 +903,7 @@ export default function App() {
               compassAngle={state?.compassAngle ?? null}
               imageMissing={Boolean(state?.imageMissing) && streetSource === "live"}
               playLength={playLength}
+              playSpeed={playSpeed}
               compact={streetCompact}
               apiUrl={API_URL}
               onMove={handleStreetMove}
@@ -785,7 +938,7 @@ export default function App() {
             onClick={() => (isWide ? stageMode === "street" && setStageMode("split") : setFocusedPane("map"))}
             aria-label="地図"
           >
-            {mapCompact && <span className="pip-label">タップで地図を大きく</span>}
+            {mapCompact && <span className="pip-label">地図 ⤢</span>}
             <MapView
               onPick={(lat, lng) => {
                 setGuessPin({ lat, lng });
@@ -829,6 +982,43 @@ export default function App() {
                 地図
               </button>
             </div>
+          )}
+
+          {immersive && (
+            <>
+              <div className="hud-chip" data-urgency={urgency} role="status">
+                {state && !isIdle ? (
+                  <>
+                    <span className="hud-round">
+                      R{state.round}/{state.maxRounds}
+                    </span>
+                    <span className="hud-score">{formatScore(myRank?.total ?? 0)}点</span>
+                    <span className="hud-timer">
+                      {isMoving ? "移動中" : countdown ? formatClock(countdown.seconds) : "—"}
+                    </span>
+                  </>
+                ) : (
+                  <span className="hud-round">GeoChase</span>
+                )}
+              </div>
+              <button
+                type="button"
+                className="hud-exit"
+                onClick={toggleImmersive}
+                title="全画面を終了します（Esc / F）"
+              >
+                ✕ 全画面終了
+              </button>
+              <button
+                type="button"
+                className="primary-btn hud-action"
+                onClick={primaryAction.onClick}
+                disabled={primaryAction.disabled}
+                title={primaryAction.title}
+              >
+                {primaryAction.label}
+              </button>
+            </>
           )}
 
           {(isMoving || busy) && (
@@ -918,7 +1108,7 @@ export default function App() {
                 ) : (
                   <p className="note">
                     範囲を絞るほどヒントは細かいところから始まります（都道府県を選ぶと市区町村から）。
-                    自動車の撮影が無いエリアでは、自動でひとつ広い範囲に切り替わります。
+                    車載の360°画像が無い県では、自動でひとつ広い範囲（地方→全国）に切り替わります。
                   </p>
                 )}
 
@@ -1133,6 +1323,15 @@ export default function App() {
                 ) : (
                   <p className="note">まだ記録はありません。</p>
                 )}
+
+                {/* 地図・映像に重ねていた出典表示はここへ移設。
+                    OSM(ODbL)・Mapillary(CC BY-SA)等の利用条件のため、この一覧は消さないこと */}
+                <h2>出典・クレジット</h2>
+                <div className="credit-list">
+                  {getCredits().map((line, i) => (
+                    <p key={i}>{line}</p>
+                  ))}
+                </div>
               </section>
             )}
           </div>
@@ -1169,46 +1368,15 @@ export default function App() {
           </nav>
 
           <footer className="actionbar">
-            {isReveal ? (
-              <button
-                type="button"
-                className="primary-btn wide"
-                onClick={nextRound}
-                disabled={isMoving || !isHost}
-                title={isHost ? undefined : "ホストだけが次のラウンドへ進められます"}
-              >
-                {isMoving
-                  ? "次の地点を探しています…"
-                  : isHost
-                  ? "次のラウンドへ"
-                  : "ホストが次に進めるのを待っています"}
-              </button>
-            ) : isFinished ? (
-              <button type="button" className="primary-btn wide" onClick={handleStart} disabled={busy || !isHost}>
-                {isHost
-                  ? `もう一度あそぶ（あなた ${formatScore(myRank?.total ?? 0)}点）`
-                  : `あなた ${formatScore(myRank?.total ?? 0)}点（ホスト待ち）`}
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="primary-btn wide"
-                onClick={submitGuess}
-                disabled={!guessPin || !isRunning || isMoving || waitingOthers}
-              >
-                {isMoving
-                  ? "逃走者が移動中…"
-                  : waitingOthers
-                  ? `他の人を待っています（${answered}/${players}人）`
-                  : !isRunning
-                  ? isHost
-                    ? "スタートすると回答できます"
-                    : "ホストの開始を待っています"
-                  : guessPin
-                  ? "ここだと回答する"
-                  : "地図をタップしてピンを置く"}
-              </button>
-            )}
+            <button
+              type="button"
+              className="primary-btn wide"
+              onClick={primaryAction.onClick}
+              disabled={primaryAction.disabled}
+              title={primaryAction.title}
+            >
+              {primaryAction.label}
+            </button>
           </footer>
         </aside>
       </div>

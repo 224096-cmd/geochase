@@ -216,7 +216,7 @@ export class GameRoom extends DurableObject<Env> {
       if (found?.spot?.imageId) {
         if (found.region !== region) {
           this.notice(
-            `${regionLabel(region)}で自動車の撮影が見つからなかったため、${regionLabel(found.region)}まで範囲を広げました`
+            `${regionLabel(region)}で車載の360°画像が見つからなかったため、${regionLabel(found.region)}まで範囲を広げました`
           );
         }
         return { spot: found.spot, region: found.region };

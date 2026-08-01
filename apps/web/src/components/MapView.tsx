@@ -18,10 +18,11 @@ const guessPinIcon = makePinIcon("#E0483E");
 const targetPinIcon = makePinIcon("#4FD1A5");
 
 // 地図タイルは完全無料・商用可のものだけ。
-// tile.openstreetmap.org は重い利用が禁止されているため使わない
-const OFM_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
+// tile.openstreetmap.org は重い利用が禁止されているため使わない。
+// OpenFreeMap は無料・商用可・APIキー不要（https://openfreemap.org）。
+// Googleマップに近い明るい配色で、POI（建物名）が最も多い bright スタイルを使う
+const OFM_STYLE_URL = "https://tiles.openfreemap.org/styles/bright";
 
-const GSI_LIST_URL = "https://maps.gsi.go.jp/development/ichiran.html";
 const GSI_PALE_URL = "https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png";
 const GSI_STD_URL = "https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png";
 const GSI_PHOTO_URL = "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg";
@@ -29,18 +30,7 @@ const GSI_PHOTO_URL = "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x
 const BLANK_TILE = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 
 const WORLD_PHOTO_URL = import.meta.env.VITE_WORLD_PHOTO_URL as string | undefined;
-const WORLD_ATTRIBUTION = (import.meta.env.VITE_WORLD_ATTRIBUTION as string | undefined) ?? "";
 const WORLD_TILE_SIZE = Number(import.meta.env.VITE_WORLD_TILE_SIZE ?? 256) || 256;
-
-const CREDITS = [
-  "地図: © OpenFreeMap © OpenMapTiles © OpenStreetMap contributors",
-  "ストリート画像: © Mapillary contributors（CC BY-SA 4.0）",
-  "地名検索: © OpenStreetMap contributors / Nominatim（ODbL）",
-  "航空写真・地名: 国土地理院「地理院タイル」（写真・標準地図・淡色地図）",
-  "写真 ズーム9〜13: データソース：Landsat8画像（GSI,TSIC,GEO Grid/AIST）, Landsat8画像（courtesy of the U.S. Geological Survey）, 海底地形（GEBCO）",
-  "写真 ズーム2〜8: Images on 世界衛星モザイク画像 obtained from site https://lpdaac.usgs.gov/data_access maintained by the NASA Land Processes Distributed Active Archive Center (LP DAAC), USGS/Earth Resources Observation and Science (EROS) Center, Sioux Falls, South Dakota. Source of image data product.",
-  "一部にGRUS画像（© Axelspace）を含みます。",
-];
 
 const JAPAN = { minLat: 20.0, maxLat: 46.5, minLng: 122.0, maxLng: 154.0 };
 
@@ -52,6 +42,97 @@ type LayerKey = "map" | "photo";
 
 function formatLatLng(p: LatLng) {
   return `${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}`;
+}
+
+/** ラベルは日本語優先（Googleマップと同じ見え方にする） */
+const JA_NAME = ["coalesce", ["get", "name:ja"], ["get", "name"], ["get", "name:latin"]];
+
+/**
+ * OpenFreeMap の bright スタイルを取得して、日本向けに加工する。
+ *  - すべてのラベルを日本語優先の1段表示にする（既定は「ローマ字＋現地語」の2段）
+ *  - 都道府県境（admin_level=4）をGoogle風の紫の破線で強調するレイヤーを追加
+ *  - 県名ラベル（class=state）をズーム12まで表示し、日本語・非斜体にする
+ *  - POI（建物・店の名前）の表示開始ズームを下げて数を増やす
+ * 取得に失敗したら null を返し、呼び出し側は素のスタイルURLで初期化する。
+ */
+async function buildJapaneseStyle(): Promise<unknown | null> {
+  try {
+    const res = await fetch(OFM_STYLE_URL);
+    if (!res.ok) return null;
+    const style = (await res.json()) as any;
+    if (!Array.isArray(style?.layers) || !style?.sources) return null;
+
+    const srcId = Object.keys(style.sources).find((k) => style.sources[k]?.type === "vector");
+    if (!srcId) return null;
+
+    for (const layer of style.layers) {
+      const layout = layer.layout as Record<string, unknown> | undefined;
+      if (layout && layout["text-field"]) {
+        layout["text-field"] = JA_NAME;
+      }
+      // 建物名・店名（POI）を2ズーム早く出して密度を上げる
+      if (layer["source-layer"] === "poi" && layer.type === "symbol" && typeof layer.minzoom === "number") {
+        layer.minzoom = Math.max(12, layer.minzoom - 2);
+      }
+      // 県名: 既定は maxzoom 8 で消えて英字斜体。日本語・太字でズーム12まで残す
+      if (layer.id === "label_state") {
+        layer.maxzoom = 12;
+        layer.layout = {
+          ...layout,
+          "text-field": JA_NAME,
+          "text-font": ["Noto Sans Bold"],
+          "text-transform": "none",
+          "text-letter-spacing": 0.06,
+          "text-size": ["interpolate", ["linear"], ["zoom"], 5, 11, 8, 15, 11, 13],
+        };
+        layer.paint = {
+          ...layer.paint,
+          "text-color": "#7b5aa6",
+          "text-halo-color": "#ffffff",
+          "text-halo-width": 1.4,
+        };
+      }
+    }
+
+    // 都道府県境。淡い縁取り＋紫の破線（Googleマップの行政界に寄せる）
+    const boundaryFilter = ["all", ["==", ["get", "admin_level"], 4], ["!=", ["get", "maritime"], 1]];
+    const prefCasing = {
+      id: "geochase-pref-casing",
+      type: "line",
+      source: srcId,
+      "source-layer": "boundary",
+      minzoom: 4,
+      filter: boundaryFilter,
+      paint: {
+        "line-color": "#b39ddb",
+        "line-opacity": 0.35,
+        "line-width": ["interpolate", ["linear"], ["zoom"], 4, 2, 8, 5, 12, 8],
+      },
+    };
+    const prefLine = {
+      id: "geochase-pref-line",
+      type: "line",
+      source: srcId,
+      "source-layer": "boundary",
+      minzoom: 4,
+      filter: boundaryFilter,
+      paint: {
+        "line-color": "#7e57c2",
+        "line-opacity": 0.9,
+        "line-dasharray": [3, 2],
+        "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.8, 8, 1.6, 12, 2.4],
+      },
+    };
+
+    // ラベル（symbol）の直前に挿入して、文字が線に隠れないようにする
+    const firstSymbol = style.layers.findIndex((l: any) => l.type === "symbol");
+    const at = firstSymbol >= 0 ? firstSymbol : style.layers.length;
+    style.layers.splice(at, 0, prefCasing, prefLine);
+    return style;
+  } catch (err) {
+    console.error("style build failed", err);
+    return null;
+  }
 }
 
 interface Props {
@@ -97,7 +178,6 @@ export default function MapView({
   const [layer, setLayer] = useState<LayerKey>("map");
   const [labelsOn, setLabelsOn] = useState(true);
   const [tilesLoading, setTilesLoading] = useState(false);
-  const [showCredits, setShowCredits] = useState(false);
   const [copied, setCopied] = useState(false);
   const [outOfPhotoRange, setOutOfPhotoRange] = useState(false);
 
@@ -111,6 +191,8 @@ export default function MapView({
     const map = L.map(containerRef.current, {
       doubleClickZoom: true,
       zoomControl: false,
+      // 出典はゲーム中の画面には出さず「記録」タブに常設する（credits.ts）
+      attributionControl: false,
       worldCopyJump: true,
       minZoom: 2,
       maxZoom: 19,
@@ -120,13 +202,12 @@ export default function MapView({
       zoomDelta: 0.5,
     }).setView([35.681, 139.767], 4);
 
-    L.control.zoom({ position: "topright" }).addTo(map);
-    map.attributionControl.setPrefix("");
+    // Googleマップと同じくズームは右下
+    L.control.zoom({ position: "bottomright" }).addTo(map);
 
     const photo = L.layerGroup();
     if (WORLD_PHOTO_URL) {
       L.tileLayer(WORLD_PHOTO_URL, {
-        attribution: WORLD_ATTRIBUTION,
         maxZoom: 19,
         maxNativeZoom: 19,
         tileSize: WORLD_TILE_SIZE,
@@ -136,7 +217,6 @@ export default function MapView({
       }).addTo(photo);
     }
     const gsiPhoto = L.tileLayer(GSI_PHOTO_URL, {
-      attribution: `<a href="${GSI_LIST_URL}" target="_blank" rel="noreferrer">地理院タイル</a>（写真）`,
       maxZoom: 19,
       maxNativeZoom: 18,
       minZoom: WORLD_PHOTO_URL ? 9 : 2,
@@ -158,7 +238,6 @@ export default function MapView({
     });
 
     const raster = L.tileLayer(GSI_PALE_URL, {
-      attribution: `<a href="${GSI_LIST_URL}" target="_blank" rel="noreferrer">地理院タイル</a>（淡色地図）`,
       maxZoom: 19,
       maxNativeZoom: 18,
       errorTileUrl: BLANK_TILE,
@@ -192,7 +271,7 @@ export default function MapView({
     let disposed = false;
     (async () => {
       try {
-        const maplibre = await import("maplibre-gl");
+        const [maplibre, style] = await Promise.all([import("maplibre-gl"), buildJapaneseStyle()]);
         await import("maplibre-gl/dist/maplibre-gl.css");
         (window as any).maplibregl = (maplibre as any).default ?? maplibre;
         (window as any).L = L;
@@ -200,8 +279,8 @@ export default function MapView({
         if (disposed || !(L as any).maplibreGL) return;
 
         vectorBase.current = (L as any).maplibreGL({
-          style: OFM_STYLE_URL,
-          attribution: "© OpenFreeMap © OpenMapTiles © OpenStreetMap contributors",
+          // 加工に失敗した場合は素の bright スタイルURLで動かす
+          style: style ?? OFM_STYLE_URL,
         });
 
         if (layerRef.current === "map" && mapRef.current && vectorBase.current) {
@@ -247,10 +326,7 @@ export default function MapView({
       if (base && map.hasLayer(base)) map.removeLayer(base);
       if (photo && !map.hasLayer(photo)) photo.addTo(map);
       if (labels) {
-        if (labelsOn && !map.hasLayer(labels)) {
-          labels.addTo(map);
-          labels.bringToFront();
-        }
+        if (labelsOn && !map.hasLayer(labels)) labels.addTo(map);
         if (!labelsOn && map.hasLayer(labels)) map.removeLayer(labels);
       }
     }
@@ -403,7 +479,6 @@ export default function MapView({
           onClick={(e) => {
             e.stopPropagation();
             setLayer((l) => (l === "map" ? "photo" : "map"));
-            setShowCredits(false);
           }}
         >
           {layer === "map" ? "写真" : "地図"}
@@ -457,29 +532,6 @@ export default function MapView({
           </button>
         )}
       </div>
-
-      {!compact && (
-        <>
-          <button
-            type="button"
-            className="map-credit-btn"
-            onClick={(e) => {
-              e.stopPropagation();
-              setShowCredits((v) => !v);
-            }}
-          >
-            出典
-          </button>
-          {showCredits && (
-            <div className="map-credit-panel" onClick={(e) => e.stopPropagation()}>
-              {CREDITS.map((line, i) => (
-                <p key={i}>{line}</p>
-              ))}
-              {WORLD_ATTRIBUTION && <p>世界範囲の写真: {WORLD_ATTRIBUTION}</p>}
-            </div>
-          )}
-        </>
-      )}
 
       {outOfPhotoRange && !compact && (
         <div className="map-range-note">この範囲の航空写真は日本国内のみです</div>

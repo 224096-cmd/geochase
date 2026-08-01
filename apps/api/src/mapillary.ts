@@ -26,8 +26,10 @@ const CAR_MAX_SPEED_MPS = 45;
 const CAR_MIN_SPEED_MPS = 8;
 const MAX_ALTITUDE_M = 3900;
 const MAX_ALTITUDE_SPREAD_M = 400;
-const STRAIGHT_RUN_KM = 1.2;
-const STRAIGHT_TURN_PER_KM = 8;
+// 電車・船は短い区間でもほぼ直進で減速しない。判定を広めに取る
+const STRAIGHT_RUN_KM = 0.9;
+const STRAIGHT_TURN_PER_KM = 10;
+const NEVER_SLOWED_MPS = 5.5;
 
 interface QualityTier {
   label: string;
@@ -37,12 +39,12 @@ interface QualityTier {
   walkable: boolean;
 }
 
+// 出題は360°パノラマのみ。平面画像（一方向しか見えない画像）は
+// ティアから外し、どの段階でも採用されないようにする
 const QUALITY_TIERS: QualityTier[] = [
   { label: "pano-best", pano: true, minWidth: 5000, freshYears: 8, walkable: true },
   { label: "pano-good", pano: true, minWidth: 3800, freshYears: 12, walkable: true },
   { label: "pano-any", pano: true, minWidth: 0, freshYears: 0, walkable: false },
-  { label: "flat-good", pano: false, minWidth: 2560, freshYears: 12, walkable: true },
-  { label: "flat-any", pano: false, minWidth: 0, freshYears: 0, walkable: false },
 ];
 
 const YEAR_MS = 365.25 * 24 * 60 * 60 * 1000;
@@ -603,7 +605,7 @@ function classifyTransport(stats: SeqStats | undefined, img?: RawImage): Transpo
   if (p80Speed < CAR_MIN_SPEED_MPS) return "cycle";
   if ((medianSpeed ?? 0) > CAR_MAX_SPEED_MPS) return "air";
 
-  const neverSlowed = (minSpeed ?? 0) > 6;
+  const neverSlowed = (minSpeed ?? 0) > NEVER_SLOWED_MPS;
   if (spanKm > STRAIGHT_RUN_KM && turnPerKm !== null && turnPerKm < STRAIGHT_TURN_PER_KM && neverSlowed) {
     return "rail_or_boat";
   }
@@ -635,6 +637,9 @@ function rankCandidates(pool: RawImage[]): Candidate[] {
   const out: Candidate[] = [];
   for (let i = 0; i < shuffled.length; i++) {
     const img = shuffled[i];
+    // 出題候補は「360°パノラマ」かつ「自動車」だけ。
+    // 一方向しか見えない平面画像や電車・徒歩の列はここで落とす
+    if (img.is_pano !== true) continue;
     const seqStats = img.sequence ? stats.get(img.sequence) : undefined;
     const transport = classifyTransport(seqStats, img);
     if (transport !== "car") continue;
@@ -648,7 +653,6 @@ function rankCandidates(pool: RawImage[]): Candidate[] {
     const seqLength = seqStats?.count ?? 1;
     const age = ageYears(img);
     const score =
-      (img.is_pano ? 4_000_000 : 0) +
       Math.max(0, 1 - age / 10) * 900_000 +
       Math.min(neighbors, 30) * 20_000 +
       Math.min(seqLength, 40) * 13_000;
@@ -721,7 +725,12 @@ async function selectBestSpot(
       const merged: RawImage = detail ? { ...c.img, ...detail } : c.img;
       return { ...c, img: merged };
     })
-    .filter((c) => classifyTransport(undefined, c.img) !== "foot" && c.img.on_foot !== true);
+    .filter(
+      (c) =>
+        c.img.is_pano === true &&
+        classifyTransport(undefined, c.img) !== "foot" &&
+        c.img.on_foot !== true
+    );
 
   if (enriched.length === 0) return null;
 
@@ -735,6 +744,7 @@ async function selectBestSpot(
     }
   }
 
+  // enriched は全てパノラマ＋車載なので、ここで返しても平面画像は混ざらない
   const fallback = enriched.find((c) => accept(toSpot(c.img)));
   return fallback ? toSpot(fallback.img, { neighbors: fallback.neighbors, transport: "car" }) : null;
 }
@@ -748,8 +758,9 @@ interface Seed {
 const SEED_LIMIT = 80;
 const SEED_TTL_SEC = 60 * 60 * 24 * 60;
 
+// v3: パノラマ＋車載だけを保存する。v2以前の平面画像シードは使わない
 function seedKey(region: RegionKey): string {
-  return `seeds:v2:${region}`;
+  return `seeds:v3:${region}`;
 }
 
 async function loadSeeds(kv: KVNamespace | undefined, region: RegionKey): Promise<Seed[]> {
@@ -763,7 +774,7 @@ async function loadSeeds(kv: KVNamespace | undefined, region: RegionKey): Promis
 
 // サムネイルURLには期限があるのでIDだけ保存し、使うときに取り直す
 async function rememberSeed(kv: KVNamespace | undefined, region: RegionKey, spot: StreetSpot): Promise<void> {
-  if (!kv || !spot.imageId) return;
+  if (!kv || !spot.imageId || !spot.isPano) return;
   try {
     const seeds = await loadSeeds(kv, region);
     if (seeds.some((s) => s.id === spot.imageId)) return;
@@ -794,7 +805,7 @@ async function spotFromSeeds(
   const details = await fetchDetails(token, pick.map((s) => s.id), budget);
   for (const seed of pick) {
     const img = details.get(seed.id);
-    if (img && img.on_foot !== true) return toSpot(img, { transport: "car" });
+    if (img && img.is_pano === true && img.on_foot !== true) return toSpot(img, { transport: "car" });
   }
   return null;
 }
@@ -1022,24 +1033,31 @@ export async function nearestImage(
     return detail ? { ...s.img, ...detail } : s.img;
   };
 
+  const excluded = new Set<TransportMode>(["foot", "cycle", "rail_or_boat", "air"]);
+
   for (const strict of [true, false]) {
     for (const s of sorted) {
       const merged = merge(s);
       if (merged.on_foot === true) continue;
-      if (panoOnly && !merged.is_pano) continue;
+      if (panoOnly && merged.is_pano !== true) continue;
       const transport = classifyTransport(merged.sequence ? stats.get(merged.sequence) : undefined, merged);
-      if (strict && carOnly && transport !== "car" && transport !== "unknown") continue;
+      if (carOnly && excluded.has(transport)) continue;
+      if (strict && carOnly && transport !== "car") continue;
       return toSpot(merged, { transport });
     }
   }
 
-  const lastResort =
-    sorted.find((s) => details.get(s.img.id)?.on_foot !== true) ?? sorted[0];
-  if (!lastResort) return null;
-  const img = details.get(lastResort.img.id) ?? lastResort.img;
-  return toSpot(img, {
-    transport: classifyTransport(img.sequence ? stats.get(img.sequence) : undefined, img),
-  });
+  // 最後の保険。panoOnly のときにパノラマ以外を返すと
+  // 「一方向しか見えない画像」が漏れるので、条件は絶対に緩めない
+  for (const s of sorted) {
+    const img = details.get(s.img.id) ?? s.img;
+    if (img.on_foot === true) continue;
+    if (panoOnly && img.is_pano !== true) continue;
+    const transport = classifyTransport(img.sequence ? stats.get(img.sequence) : undefined, img);
+    if (carOnly && excluded.has(transport)) continue;
+    return toSpot(img, { transport });
+  }
+  return null;
 }
 
 export function destinationPoint(from: LatLng, bearingDegrees: number, distanceKm = 0.8): LatLng {
