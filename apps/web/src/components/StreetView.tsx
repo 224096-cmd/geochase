@@ -45,6 +45,9 @@ interface Props {
 const MAPILLARY_TOKEN = import.meta.env.VITE_MAPILLARY_TOKEN as string | undefined;
 const LOAD_TIMEOUT_MS = 12_000;
 
+/** 真北から時計回りに45度きざみ。コンパスの文字表示に使う */
+const DIRECTION_LABELS = ["北", "北東", "東", "南東", "南", "南西", "西", "北西"];
+
 type Phase = "empty" | "loading" | "ready" | "fallback" | "failed";
 
 const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
@@ -77,6 +80,9 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
   const [playback, setPlayback] = useState<Playback>("none");
   const [seeking, setSeeking] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  /** いま向いている方角（真北=0、時計回りの度数）。未取得なら null */
+  const [bearing, setBearing] = useState<number | null>(null);
+  const bearingRef = useRef<number | null>(null);
 
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
@@ -117,6 +123,24 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
     } catch {}
   }, []);
 
+  // コンパスをタップしたときに真北へ向き直す。
+  // 360°パノラマは basic 座標の x が 0→1 で一周するので、北までの角度差を x の差に換算する
+  const faceNorth = useCallback(() => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    try {
+      Promise.all([viewer.getCenter(), viewer.getBearing()])
+        .then(([center, current]: [number[], number]) => {
+          if (!Array.isArray(center) || !Number.isFinite(current)) return;
+          // 北まで近い方向に回す（-180〜180度）
+          const delta = ((0 - current + 540) % 360) - 180;
+          const x = ((((center[0] + delta / 360) % 1) + 1) % 1);
+          viewer.setCenter([x, center[1]]);
+        })
+        .catch(() => {});
+    } catch {}
+  }, []);
+
   const clearPlayTimer = useCallback(() => {
     if (playTimerRef.current !== null) {
       window.clearTimeout(playTimerRef.current);
@@ -154,7 +178,8 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
             // visible:false ならコンポーネント自体は生きていて play/stop は使える。
             // 操作は画面外のツールバー（App側）から行う
             sequence: { visible: false },
-            bearing: true,
+            // 方角は自前のコンパス（street-compass）で日本語表示するため内蔵版は使わない
+            bearing: false,
             // 出典表示はゲーム中の画面には出さず、「記録」タブに常設する。
             // Mapillary(CC BY-SA)のクレジットは credits.ts 経由で必ず表示している
             attribution: false,
@@ -168,6 +193,16 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
         } as any);
 
         viewer.on("dataloading", (e: any) => setDataLoading(Boolean(e?.loading)));
+
+        // 視点を回すたびに発火する。1度単位に丸めて無駄な再描画を防ぐ
+        viewer.on("bearing", (e: any) => {
+          const raw = Number(e?.bearing);
+          if (!Number.isFinite(raw)) return;
+          const deg = ((Math.round(raw) % 360) + 360) % 360;
+          if (bearingRef.current === deg) return;
+          bearingRef.current = deg;
+          setBearing(deg);
+        });
 
         viewer.on("image", (e: any) => {
           const img = e?.image;
@@ -221,6 +256,8 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
     clearPlayTimer();
     zoomRef.current = 0;
     homeIdRef.current = imageId;
+    bearingRef.current = null;
+    setBearing(null);
 
     let cancelled = false;
     const timer = window.setTimeout(() => {
@@ -486,6 +523,14 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
 
   const showControls = phase === "ready" && !compact;
 
+  // ビューアが方角を返すまでは、画像そのものの撮影方位（進行方向）で代用する
+  const shownBearing =
+    bearing ??
+    (typeof compassAngle === "number" && Number.isFinite(compassAngle)
+      ? ((Math.round(compassAngle) % 360) + 360) % 360
+      : null);
+  const dirLabel = shownBearing == null ? "—" : DIRECTION_LABELS[Math.round(shownBearing / 45) % 8];
+
   return (
     <div className={`street-wrap${compact ? " is-compact" : ""}`}>
       <div
@@ -535,6 +580,26 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
 
       {showControls && (
         <div className="street-controls">
+          <button
+            type="button"
+            className="street-compass"
+            onClick={faceNorth}
+            title="いま向いている方角です。タップすると北を向きます"
+            aria-label={shownBearing == null ? "方角を取得中" : `方角 ${dirLabel} ${shownBearing}度`}
+          >
+            <svg
+              viewBox="0 0 36 36"
+              aria-hidden="true"
+              style={{ transform: `rotate(${-(shownBearing ?? 0)}deg)` }}
+            >
+              <circle cx="18" cy="18" r="15" />
+              <polygon className="compass-n" points="18,3.5 22.6,18 18,15.4 13.4,18" />
+              <polygon className="compass-s" points="18,32.5 22.6,18 18,20.6 13.4,18" />
+            </svg>
+            <span className="compass-text">
+              {shownBearing == null ? "—" : `${dirLabel} ${shownBearing}°`}
+            </span>
+          </button>
           <button type="button" className="street-btn" onClick={zoomIn} aria-label="拡大">
             ＋
           </button>

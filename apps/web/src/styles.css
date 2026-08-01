@@ -40,6 +40,8 @@ body {
   height: 100vh;
   /* dvh は実際に見えている高さ。svh だと下に隙間が残る */
   height: 100dvh;
+  /* JSが実測した表示高さ。端末によっては dvh でも下に余白が残るため最終的にこれを使う */
+  height: var(--app-h, 100dvh);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -481,14 +483,47 @@ code {
 /* 内蔵の再生UI（速度・タイムライン）と出典表示は画面に重ねない。
    再生操作は画面外のツールバー、出典は「記録」タブに常設している */
 .mapillary-sequence-container,
-.mapillary-attribution-container {
+.mapillary-attribution-container,
+.mapillary-bearing-indicator-container {
   display: none !important;
 }
 
-/* 小窓のときは矢印・コンパスも隠して映像だけを見せる（文字・記号の密集を防ぐ） */
-.street-wrap.is-compact .mapillary-bearing-indicator-container,
+/* 小窓のときは進行方向の矢印も隠して映像だけを見せる（記号の密集を防ぐ） */
 .street-wrap.is-compact .mapillary-direction-perspective {
   display: none !important;
+}
+
+/* いま向いている方角。タップで北を向く */
+.street-compass {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  background: rgb(7 12 11 / 88%);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 4px 6px 5px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.street-compass svg {
+  display: block;
+  width: 30px;
+  height: 30px;
+  transition: transform 0.12s linear;
+}
+
+.street-compass circle { fill: rgb(255 255 255 / 6%); stroke: var(--line); stroke-width: 1; }
+.compass-n { fill: var(--hot); }
+.compass-s { fill: #8aa69c; }
+
+.compass-text {
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
 }
 
 .street-fallback {
@@ -1388,7 +1423,11 @@ body.is-immersive .ad-pc {
 .app.is-immersive .stage { padding: 0; }
 .app.is-immersive .pane { border-radius: 0; border: none; }
 
-/* 画面端のボタンは小さく */
+/* 画面端のボタンは小さく。右上は「全画面終了」と重なるので一段下げる */
+.app.is-immersive .street-controls { top: 46px; }
+.app.is-immersive .street-compass { padding: 3px 5px 4px; }
+.app.is-immersive .street-compass svg { width: 26px; height: 26px; }
+.app.is-immersive .compass-text { font-size: 9px; }
 .app.is-immersive .street-btn { width: 30px; height: 30px; font-size: 13px; }
 .app.is-immersive .street-btn.is-wide { width: auto; height: 26px; padding: 0 9px; font-size: 10px; }
 .app.is-immersive .map-btn { min-height: 28px; padding: 4px 9px; font-size: 10px; }
