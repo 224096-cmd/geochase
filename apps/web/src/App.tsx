@@ -192,9 +192,22 @@ export default function App() {
     ready: false,
     playback: "none",
     seeking: false,
+    seq: null,
   });
   const [playLength, setPlayLength] = useState(loadPlayLength);
   const [playSpeed, setPlaySpeed] = useState(loadPlaySpeed);
+  // シークバーのドラッグ中の値。確定(移動)は250msの静止後
+  const [seekDraft, setSeekDraft] = useState<number | null>(null);
+  const seekTimerRef = useRef<number | null>(null);
+  const onSeekInput = useCallback((idx: number) => {
+    setSeekDraft(idx);
+    if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
+    seekTimerRef.current = window.setTimeout(() => {
+      seekTimerRef.current = null;
+      streetRef.current?.seekTo(idx);
+      setSeekDraft(null);
+    }, 250);
+  }, []);
   // 全画面モード。映像と地図だけを表示し、必要なボタンは画面端に小さく出す
   const [immersive, setImmersive] = useState(false);
   const stageRef = useRef<HTMLElement>(null);
@@ -831,6 +844,23 @@ export default function App() {
             ))}
           </select>
         </label>
+        {streetStatus.seq && (
+          <label className="tool-seek" title="この道のどこを見るかを選べます">
+            <span className="sr-only">走行ルート内の再生位置</span>
+            <input
+              type="range"
+              min={0}
+              max={streetStatus.seq.total - 1}
+              step={1}
+              value={seekDraft ?? streetStatus.seq.idx}
+              onChange={(e) => onSeekInput(Number(e.target.value))}
+              disabled={!streetStatus.ready}
+            />
+            <span className="tool-seek-pos">
+              {(seekDraft ?? streetStatus.seq.idx) + 1}/{streetStatus.seq.total}
+            </span>
+          </label>
+        )}
         <button
           type="button"
           className="tool-btn"

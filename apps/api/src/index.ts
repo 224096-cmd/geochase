@@ -1,5 +1,5 @@
 import type { Env } from "./types";
-import { nearestImage, REGION_DEFS } from "./mapillary";
+import { nearestImage, REGION_DEFS, setRailAssets } from "./mapillary";
 export { GameRoom } from "./GameRoom";
 
 const DEFAULT_ORIGIN = "http://localhost:5173";
@@ -26,6 +26,8 @@ function corsHeaders(origin: string): Record<string, string> {
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
+    // 電車判定用の線路タイル。未設定の間は検証が全て不合格になる(安全側)
+    setRailAssets(env.RAIL);
     const url = new URL(req.url);
     const headers = corsHeaders(resolveAllowedOrigin(env, req.headers.get("Origin")));
 

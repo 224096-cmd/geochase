@@ -782,100 +782,67 @@ function segDistanceKm(p: LatLng, a: LatLng, b: LatLng): { d: number; bearing: n
   return { d: Math.sqrt(cx * cx + cy * cy), bearing: bearingDeg(a, b) };
 }
 
-interface OverpassWay {
-  tags?: Record<string, string>;
-  geometry?: { lat: number; lon: number }[];
+/* ------------------------------------------------------------
+   線路照合(自前データ)
+
+   ビルド時にOSMから抽出した線路を0.25°タイル(rail-tiles/r{a}_{b}.json)として
+   Workerに同梱している。実行時は外部APIを一切呼ばず、
+   env.RAIL(assetsバインディング)から該当タイルを読むだけ。
+   タイルはトンネルと車両基地の側線を除外済み。
+   ------------------------------------------------------------ */
+
+type RailSeg = [number, number, number, number]; // lat1,lng1,lat2,lng2
+
+let railAssets: Fetcher | null = null;
+const railTileCache = new Map<string, RailSeg[] | null>(); // null = タイルなし(線路なし)
+
+/** リクエスト冒頭で必ず呼ぶ。これが無い間の検証は全て「不合格」になる(安全側) */
+export function setRailAssets(fetcher: Fetcher | undefined | null): void {
+  railAssets = fetcher ?? null;
 }
 
+async function loadRailTile(key: string): Promise<RailSeg[] | null | undefined> {
+  if (railTileCache.has(key)) return railTileCache.get(key);
+  if (!railAssets) return undefined; // バインディング未設定=判定不能
+  try {
+    const res = await railAssets.fetch(`https://rail.local/r${key}.json`);
+    if (res.status === 404) {
+      if (railTileCache.size > 200) railTileCache.clear();
+      railTileCache.set(key, null);
+      return null;
+    }
+    if (!res.ok) return undefined;
+    const segs = (await res.json()) as RailSeg[];
+    if (railTileCache.size > 200) railTileCache.clear();
+    railTileCache.set(key, segs);
+    return segs;
+  } catch {
+    return undefined; // 読み込み失敗=判定不能
+  }
+}
+
+const RAIL_TILE = 4; // 0.25°
+
 /**
- * サンプル点の周辺にある線路と道路を1回のOverpassクエリで取得し、
- * 各点が「最寄りの線路の上（かつ進行方向が線路と平行）で、
- * どの道路よりも線路に近い」かを数える。
- * 線路沿いの並走道路は道路のほうが近くなるので誤爆しない。
- * 失敗時は null（呼び出し側が統計だけで安全側に判断する）。
+ * その地点の線路との位置関係。電車のGPSは10〜20mズレることがあるため、
+ * 12m以内=強い証拠 / 28m以内=弱い証拠 の2段階で返す(いずれも進行方向が線路と平行のときのみ)。
+ * undefined=判定不能(呼び出し側は不合格扱いにする)
  */
-async function railHits(points: { p: LatLng; travelBearing: number }[]): Promise<number | null> {
-  if (points.length === 0) return 0;
-  const rail = points
-    .map(({ p }) => `way(around:26,${p.lat.toFixed(6)},${p.lng.toFixed(6)})[railway~"^(rail|light_rail|subway|tram|monorail|narrow_gauge|funicular)$"];`)
-    .join("");
-  const road = points
-    .map(({ p }) => `way(around:26,${p.lat.toFixed(6)},${p.lng.toFixed(6)})[highway~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|living_street|road|motorway_link|trunk_link|primary_link|secondary_link)$"];`)
-    .join("");
-  const query = `[out:json][timeout:5];(${rail}${road});out tags geom 80;`;
-
-  // 公開Overpassは識別可能なUser-Agentが必須(無いと406)。本家が落ちていたらミラーを試す
-  const endpoints = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-  ];
-  let ways: OverpassWay[] | null = null;
-  for (const endpoint of endpoints) {
-    const res = await fetchWithTimeout(
-      endpoint,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "User-Agent": "GeoChase/1.0 (rail-check for game spot vetting)",
-          Accept: "application/json",
-        },
-        body: `data=${encodeURIComponent(query)}`,
-      },
-      4500
-    );
-    if (!res || !res.ok) continue;
-    try {
-      const data = (await res.json()) as { elements?: OverpassWay[] };
-      ways = data.elements ?? [];
-      break;
-    } catch {
-      continue;
-    }
+async function railEvidence(p: LatLng, travelBearing: number): Promise<"strong" | "weak" | "none" | undefined> {
+  const key = `${Math.floor(p.lat * RAIL_TILE)}_${Math.floor(p.lng * RAIL_TILE)}`;
+  const segs = await loadRailTile(key);
+  if (segs === undefined) return undefined;
+  if (segs === null) return "none";
+  let best = Infinity;
+  for (const [la1, lo1, la2, lo2] of segs) {
+    const { d, bearing } = segDistanceKm(p, { lat: la1, lng: lo1 }, { lat: la2, lng: lo2 });
+    if (d > 0.028 || d >= best) continue;
+    const diff = angleDiff(bearing, travelBearing);
+    if (Math.min(diff, 180 - diff) <= 18) best = d; // 平行(踏切の横断は数えない)
   }
-  if (ways === null) return null;
-
-  const rails: OverpassWay[] = [];
-  const roads: OverpassWay[] = [];
-  for (const w of ways) {
-    if (!w.geometry || w.geometry.length < 2) continue;
-    if (w.tags?.railway) {
-      if (w.tags.tunnel === "yes" || w.tags.tunnel === "building_passage") continue; // 地下線は地上の車と無関係
-      rails.push(w);
-    } else if (w.tags?.highway) {
-      roads.push(w);
-    }
-  }
-
-  const nearest = (p: LatLng, list: OverpassWay[], needBearing: number | null): number | null => {
-    let best: number | null = null;
-    for (const w of list) {
-      const g = w.geometry!;
-      for (let i = 1; i < g.length; i++) {
-        const { d, bearing } = segDistanceKm(
-          p,
-          { lat: g[i - 1].lat, lng: g[i - 1].lon },
-          { lat: g[i].lat, lng: g[i].lon }
-        );
-        if (needBearing !== null) {
-          const diff = angleDiff(bearing, needBearing);
-          if (Math.min(diff, 180 - diff) > 20) continue; // 平行でなければ線路とは数えない(踏切対策)
-        }
-        if (best === null || d < best) best = d;
-      }
-    }
-    return best;
-  };
-
-  let hits = 0;
-  for (const { p, travelBearing } of points) {
-    const dRail = nearest(p, rails, travelBearing);
-    if (dRail === null || dRail > 0.02) continue; // 20m以内でなければ線路上ではない
-    const dRoad = nearest(p, roads, null);
-    if (dRoad !== null && dRoad <= dRail + 0.004) continue; // 道路のほうが近い→並走道路の車
-    hits++;
-  }
-  return hits;
+  if (best <= 0.012) return "strong";
+  if (best <= 0.028) return "weak";
+  return "none";
 }
 
 /**
@@ -940,36 +907,40 @@ async function verifyCarSequenceInner(token: string, sequenceId: string, budget:
   const st = routeStats(samples);
   if (!st) return false;
 
-  // 3) ルート全体の統計で明らかな非・車を落とす
-  if (st.durationSec < 25 || st.spanKm < 0.2) return false; // 断片
-  if (st.avgSpeed > 42) return false; // 新幹線・飛行
-  if (st.maxLegSpeed > 55) return false;
-  if (st.maxLegSpeed < 8.5) return false; // 一度も車速に達しない＝徒歩・自転車・車内静止
+  // 3) ルート全体の統計。判定できないものは全て「出さない」(フェイルクローズ)
+  if (st.durationSec < 25 || st.spanKm < 0.2) return false; // 断片・単発
+  if (st.avgSpeed > 40) return false; // 新幹線・特急・飛行機
+  if (st.maxLegSpeed > 52) return false;
+  if (st.maxLegSpeed < 8.5) return false; // 一度も車速に達しない＝徒歩・自転車・静止
   if (st.avgSpeed < 2.0) return false;
+  // 船・特急の型: 長距離をほぼ曲がらず走り続ける(道路の車は交差点・カーブで必ず曲がる)
+  if (st.spanKm > 1.6 && (st.turnPerKm ?? 99) < 8) return false;
 
-  // 統計だけで見た「電車らしさ」。線路照合が使えないときだけ効く安全弁なので、
-  // 幹線道路の車を巻き込まないよう「長距離・ほぼ無旋回・速い」に絞る
-  const suspicious = st.spanKm > 2 && (st.turnPerKm ?? 99) < 10 && st.avgSpeed > 10;
-
-  // 4) 線路照合（始・中・終の3点）。電車は必ず線路上を線路と平行に走る
-  if (samples.length >= 3 && st.spanKm > 0.35) {
-    const pick = [1, Math.floor(samples.length / 2), samples.length - 2].map((i) =>
-      Math.max(1, Math.min(samples.length - 2, i))
-    );
-    const points = [...new Set(pick)].map((i) => ({
-      p: { lat: samples[i].lat, lng: samples[i].lng },
-      travelBearing: bearingDeg(
+  // 4) 線路照合(自前タイル)。中間サンプル全点(最大12点)を見て、
+  //    「線路にほぼ重なる(強)」が2点以上あれば電車として却下する。
+  //    弱い証拠(28m以内)だけでは却下しない=線路沿いの並走道路の車を守る。
+  //    タイルが読めない場合も却下(外部要因で電車が漏れる事故を二度と起こさない)
+  if (samples.length < 4) return false;
+  let strong = 0;
+  let weak = 0;
+  const last = samples.length - 2;
+  const stepIdx = Math.max(1, Math.ceil((last - 1) / 12));
+  for (let i = 1; i <= last; i += stepIdx) {
+    const ev = await railEvidence(
+      { lat: samples[i].lat, lng: samples[i].lng },
+      bearingDeg(
         { lat: samples[i - 1].lat, lng: samples[i - 1].lng },
         { lat: samples[i + 1].lat, lng: samples[i + 1].lng }
-      ),
-    }));
-    const hits = await railHits(points);
-    if (hits === null) return !suspicious; // 照合不能なら疑わしいものは出さない
-    if (hits >= 2) return false; // 3点中2点以上が線路上＝電車
-    return true;
+      )
+    );
+    if (ev === undefined) return false; // 判定不能=不合格
+    if (ev === "strong") strong++;
+    else if (ev === "weak") weak++;
+    if (strong >= 2) return false; // 早期確定: 電車
   }
-
-  return !suspicious;
+  if (strong >= 2) return false;
+  if (strong >= 1 && weak >= 5) return false; // GPSが荒れた電車の型
+  return true;
 }
 
 async function selectBestSpot(
@@ -1035,7 +1006,7 @@ const SEED_TTL_SEC = 60 * 60 * 24 * 60;
 
 // v3: パノラマ＋車載だけを保存する。v2以前の平面画像シードは使わない
 function seedKey(region: RegionKey): string {
-  return `seeds:v4:${region}`;
+  return `seeds:v5:${region}`;
 }
 
 async function loadSeeds(kv: KVNamespace | undefined, region: RegionKey): Promise<Seed[]> {

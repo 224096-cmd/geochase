@@ -14,6 +14,8 @@ export interface StreetViewStatus {
   ready: boolean;
   playback: Playback;
   seeking: boolean;
+  /** 走行ルート内の現在位置。ツールバーのシークバー用 */
+  seq: { idx: number; total: number } | null;
 }
 
 export interface StreetViewHandle {
@@ -22,6 +24,8 @@ export interface StreetViewHandle {
   step: (direction: "forward" | "reverse") => void;
   /** 再生速度 0〜1（Mapillaryの内部速度） */
   setSpeed: (speed: number) => void;
+  /** 走行ルート内の指定コマへ移動（ツールバーのシークバー用） */
+  seekTo: (idx: number) => void;
   jumpNearby: () => void;
 }
 
@@ -88,8 +92,6 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
   const [seq, setSeq] = useState<{ ids: string[]; idx: number } | null>(null);
   const seqIdRef = useRef<string>("");
   const seqIdsRef = useRef<string[]>([]);
-  const seekTimerRef = useRef<number | null>(null);
-  const [seekIdx, setSeekIdx] = useState<number | null>(null);
 
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
@@ -113,11 +115,12 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
   const statusKeyRef = useRef("");
   useEffect(() => {
     const ready = phase === "ready";
-    const key = `${ready}:${playback}:${seeking}`;
+    const seqInfo = seq && seq.ids.length > 1 ? { idx: seq.idx, total: seq.ids.length } : null;
+    const key = `${ready}:${playback}:${seeking}:${seqInfo ? `${seqInfo.idx}/${seqInfo.total}` : "-"}`;
     if (key === statusKeyRef.current) return;
     statusKeyRef.current = key;
-    onStatusRef.current?.({ ready, playback, seeking });
-  }, [phase, playback, seeking]);
+    onStatusRef.current?.({ ready, playback, seeking, seq: seqInfo });
+  }, [phase, playback, seeking, seq]);
 
   // basic image coordinates の [0.5, 0.5] が撮影時の正面。読み込み直後は必ずここへ戻す
   const faceForward = useCallback(() => {
@@ -148,26 +151,12 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
     } catch {}
   }, []);
 
-  // シークバー操作。ドラッグ中は数字だけ動かし、少し止まったら実際に移動する
-  const commitSeek = useCallback((idx: number) => {
-    const ids = seqIdsRef.current;
-    const id = ids[idx];
+  // ツールバーのシークバーから呼ばれる。走行ルート内の指定コマへ移動する
+  const seekTo = useCallback((idx: number) => {
+    const id = seqIdsRef.current[Math.round(idx)];
     if (!id) return;
     viewerRef.current?.moveTo(id).catch(() => {});
   }, []);
-
-  const onSeekChange = useCallback(
-    (idx: number) => {
-      setSeekIdx(idx);
-      if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
-      seekTimerRef.current = window.setTimeout(() => {
-        seekTimerRef.current = null;
-        setSeekIdx(null);
-        commitSeek(idx);
-      }, 250);
-    },
-    [commitSeek]
-  );
 
   const clearPlayTimer = useCallback(() => {
     if (playTimerRef.current !== null) {
@@ -315,7 +304,6 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
     seqIdRef.current = "";
     seqIdsRef.current = [];
     setSeq(null);
-    setSeekIdx(null);
 
     let cancelled = false;
     const timer = window.setTimeout(() => {
@@ -549,8 +537,8 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
 
   useImperativeHandle(
     ref,
-    () => ({ togglePlayback, step, setSpeed: applySpeed, jumpNearby }),
-    [togglePlayback, step, applySpeed, jumpNearby]
+    () => ({ togglePlayback, step, setSpeed: applySpeed, seekTo, jumpNearby }),
+    [togglePlayback, step, applySpeed, seekTo, jumpNearby]
   );
 
   if (!MAPILLARY_TOKEN) {
@@ -584,23 +572,6 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
 
       {(dataLoading || seeking) && phase === "ready" && <span className="street-progress" aria-hidden="true" />}
 
-      {showControls && seq && seq.ids.length > 1 && (
-        <div className="street-seek" onClick={(e) => e.stopPropagation()}>
-          <input
-            type="range"
-            min={0}
-            max={seq.ids.length - 1}
-            step={1}
-            value={seekIdx ?? seq.idx}
-            onChange={(e) => onSeekChange(Number(e.target.value))}
-            aria-label="走行ルート内の再生位置"
-            title="この道のどこを見るかを選べます"
-          />
-          <span className="street-seek-pos">
-            {(seekIdx ?? seq.idx) + 1}/{seq.ids.length}
-          </span>
-        </div>
-      )}
 
       {phase === "fallback" && imageUrl && (
         <img className="street-fallback" src={imageUrl} alt="現在地のストリート画像" />

@@ -14,6 +14,7 @@ import type {
 } from "./types";
 import {
   findStreetPointOnLand,
+  setRailAssets,
   moveAI,
   haversineKm,
   bearingDeg,
@@ -125,6 +126,7 @@ export class GameRoom extends DurableObject<Env> {
   private lastGuessAt = new Map<string, number>();
 
   constructor(ctx: DurableObjectState, env: Env) {
+    setRailAssets(env.RAIL);
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       const saved = await ctx.storage.get<Partial<RoomState> & { aiPosition?: LatLng | null }>("gameState");

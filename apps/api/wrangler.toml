@@ -26,3 +26,7 @@ id = "390f220348f446fd9bee7bd6e5734864"
 # --- CORS ---
 [vars]
 ALLOWED_ORIGIN = "https://geochase.pages.dev,http://localhost:5173"
+# --- 静的アセット: 自前の線路タイル(電車判定用) ---
+[assets]
+directory = "./rail-tiles"
+binding = "RAIL"

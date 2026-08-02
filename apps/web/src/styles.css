@@ -349,36 +349,27 @@ code {
 .tool-btn.is-on { background: var(--brand); border-color: var(--brand); color: #fff; }
 .tool-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-/* 全画面ボタンはツールバーの右端へ。入替ボタンがある場合はその左に付く */
-.tool-btn-swap { margin-inline-start: auto; }
-.tool-btn-swap ~ .tool-btn-end { margin-inline-start: 0; }
-.tool-btn-end { margin-inline-start: auto; }
-
-/* 走行ルートのシークバー。この道のどこを見るかを選べる */
-.street-seek {
-  position: absolute;
-  left: 50%;
-  bottom: 12px;
-  transform: translateX(-50%);
-  z-index: 7;
+/* 走行ルートのシークバー(ツールバー内)。この道のどこを見るかを選べる */
+.tool-seek {
   display: flex;
   align-items: center;
-  gap: 8px;
-  width: min(62%, 480px);
-  background: rgb(7 12 11 / 88%);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 7px 12px;
+  gap: 6px;
+  flex: 1 1 140px;
+  min-width: 110px;
+  max-width: 340px;
 }
 
-.street-seek input[type="range"] {
+.tool-seek input[type="range"] {
   flex: 1 1 auto;
   min-width: 0;
+  height: 26px;
   accent-color: var(--brand);
   cursor: pointer;
 }
 
-.street-seek-pos {
+.tool-seek input[type="range"]:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.tool-seek-pos {
   flex: 0 0 auto;
   font-family: var(--font-data);
   font-variant-numeric: tabular-nums;
@@ -386,19 +377,13 @@ code {
   color: var(--muted);
   white-space: nowrap;
 }
-.app.is-immersive .street-seek { bottom: 64px; }
 
-@media (max-width: 899px) {
-  /* 左下の小窓と重ならないよう右寄せにする */
-  .street-seek {
-    left: auto;
-    right: 8px;
-    transform: none;
-    width: min(70%, 340px);
-    padding: 6px 10px;
-    bottom: 10px;
-  }
-}
+/* 全画面ボタンはツールバーの右端へ。入替ボタンがある場合はその左に付く */
+.tool-btn-swap { margin-inline-start: auto; }
+.tool-btn-swap ~ .tool-btn-end { margin-inline-start: 0; }
+.tool-btn-end { margin-inline-start: auto; }
+
+
 
 
 .tool-select { flex: 0 0 auto; display: inline-flex; }

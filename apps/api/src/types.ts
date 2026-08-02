@@ -4,6 +4,8 @@ export interface Env {
   SESSIONS: KVNamespace;
   MAPILLARY_TOKEN: string;
   ALLOWED_ORIGIN: string;
+  /** 同梱の線路タイル(電車判定用)。assetsバインディング */
+  RAIL: Fetcher;
 }
 
 export interface LatLng {
