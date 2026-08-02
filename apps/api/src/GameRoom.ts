@@ -276,14 +276,23 @@ export class GameRoom extends DurableObject<Env> {
     } catch {}
   }
 
-  /** 場所選びのピンが、設定エリア(県・地方・国など)の範囲内かを判定する */
+  /**
+   * 場所選びのピンが、設定エリア(県・地方・国など)の範囲内かを判定する。
+   * REGION_DEFSのbboxは「出題用の都市スポット」で県全体を覆っていないため、
+   * それらの外接矩形に約35kmの余白を足した範囲を「そのエリア」とみなす
+   */
   private pinInRegion(lat: number, lng: number): boolean {
     const def = REGION_DEFS[this.gameState.region];
     if (!def?.bboxes?.length) return true;
-    const pad = 0.05;
-    return def.bboxes.some(
-      ([w, s, e, n]) => lng >= w - pad && lng <= e + pad && lat >= s - pad && lat <= n + pad
-    );
+    let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
+    for (const [bw, bs, be, bn] of def.bboxes) {
+      if (bw < w) w = bw;
+      if (bs < s) s = bs;
+      if (be > e) e = be;
+      if (bn > n) n = bn;
+    }
+    const pad = 0.35;
+    return lng >= w - pad && lng <= e + pad && lat >= s - pad && lat <= n + pad;
   }
 
   private regionLabel(): string {
