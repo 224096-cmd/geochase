@@ -19,7 +19,7 @@ export interface TrailPoint extends LatLng {
 
 export type RegionKey = string;
 
-export type GameMode = "classic" | "chase";
+export type GameMode = "classic" | "chase" | "search";
 export type GameStatus = "idle" | "running" | "reveal" | "finished";
 
 export type TransportMode = "car" | "foot" | "cycle" | "rail_or_boat" | "air" | "unknown";
@@ -94,6 +94,11 @@ export interface PublicState {
   hostId: string | null;
   answered: number;
   scoreboard: PlayerScore[];
+  /** Search & Chase: 逃走役のプレイヤーID(他モードではnull) */
+  runnerId: string | null;
+  runnerName: string | null;
+  /** Search & Chase: 逃走者の残り移動回数 */
+  relocationsLeft: number;
   moving: boolean;
   lastMoveAt: number;
   revealedTrail: TrailPoint[];
@@ -104,6 +109,7 @@ export type ClientMessage =
   | { type: "guess"; lat: number; lng: number; userId?: string; playerName?: string }
   | { type: "hint" }
   | { type: "next" }
+  | { type: "relocate"; userId?: string }
   | { type: "rename"; playerName: string }
   | { type: "sync" };
 

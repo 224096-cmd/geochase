@@ -1,4 +1,4 @@
-export type Mode = "classic" | "chase";
+export type Mode = "classic" | "chase" | "search";
 export type GameStatus = "idle" | "running" | "reveal" | "finished";
 export type Proximity = "burning" | "hot" | "warm" | "cold" | "freezing";
 
@@ -57,6 +57,10 @@ export interface RoomState {
   hostId?: string | null;
   answered?: number;
   scoreboard?: PlayerScore[];
+  /** Search & Chase: 逃走役プレイヤー(他モードではnull) */
+  runnerId?: string | null;
+  runnerName?: string | null;
+  relocationsLeft?: number;
   moving?: boolean;
   lastMoveAt?: number;
   revealedTrail: TrailPoint[];

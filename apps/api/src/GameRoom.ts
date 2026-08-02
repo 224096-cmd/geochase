@@ -28,7 +28,9 @@ import {
 
 const DEFAULT_INTERVAL_MS = 30_000;
 const MIN_INTERVAL_SECONDS = 10;
-const MAX_TIME_LIMIT_SECONDS = 1800;
+const MAX_TIME_LIMIT_SECONDS = 2700;
+// Search & Chase: 逃走者が1ラウンドに使える移動回数
+const RELOCATIONS_PER_ROUND = 2;
 const CORRECT_RADIUS_KM = 0.5;
 const CHASE_ROUNDS = 8;
 const DEFAULT_CLASSIC_ROUNDS = 5;
@@ -59,6 +61,10 @@ interface RoomState {
   round: number;
   maxRounds: number;
   runnerPosition: LatLng | null;
+  /** Search & Chase: 逃走役のプレイヤーID */
+  runnerId: string | null;
+  /** Search & Chase: このラウンドで逃走者が使える残り移動回数 */
+  relocationsLeft: number;
   trail: LatLng[];
   revealedTrail: TrailPoint[];
   imageUrl: string;
@@ -93,6 +99,8 @@ const DEFAULT_STATE: RoomState = {
   round: 0,
   maxRounds: CHASE_ROUNDS,
   runnerPosition: null,
+  runnerId: null,
+  relocationsLeft: 0,
   trail: [],
   revealedTrail: [],
   imageUrl: "",
@@ -205,6 +213,16 @@ export class GameRoom extends DurableObject<Env> {
     this.broadcast(this.publicState());
   }
 
+  private playerLabel(id: string): string {
+    const inBoard = this.gameState.scoreboard[id]?.name;
+    if (inBoard) return inBoard;
+    for (const ws of this.ctx.getWebSockets()) {
+      const a = this.attachmentOf(ws);
+      if (a?.playerId === id && a.name) return a.name;
+    }
+    return "名無しの逃走者";
+  }
+
   private notice(message: string) {
     this.broadcast({ type: "notice", message });
   }
@@ -315,8 +333,14 @@ export class GameRoom extends DurableObject<Env> {
       const denied = this.rejectIfNotHost(body.playerId, "開始");
       if (denied) return denied;
 
-      if (body.mode === "classic") await this.startClassicGame(body.region, body.timeLimitSeconds, body.rounds);
-      else await this.startChaseGame(body.region, body.intervalMs);
+      if (body.mode === "search" && this.playerCount() < 2) {
+        return Response.json(
+          { ok: false, error: "Search & Chase は2人以上で遊べます（友達を招待してください）" },
+          { status: 400 }
+        );
+      }
+      if (body.mode === "chase") await this.startChaseGame(body.region, body.intervalMs);
+      else await this.startClassicGame(body.mode, body.region, body.timeLimitSeconds, body.rounds);
       return Response.json({ ok: true, state: this.publicState() });
     }
 
@@ -357,7 +381,7 @@ export class GameRoom extends DurableObject<Env> {
     };
     try {
       const body = (await req.json()) as Record<string, unknown>;
-      if (body?.mode === "classic" || body?.mode === "chase") result.mode = body.mode;
+      if (body?.mode === "classic" || body?.mode === "chase" || body?.mode === "search") result.mode = body.mode;
       if (typeof body?.region === "string") result.region = body.region as RegionKey;
       if (typeof body?.playerId === "string") result.playerId = body.playerId;
       if (typeof body?.intervalSeconds === "number" && Number.isFinite(body.intervalSeconds)) {
@@ -396,6 +420,12 @@ export class GameRoom extends DurableObject<Env> {
       case "hint":
         await this.revealNextHint();
         break;
+
+      case "relocate": {
+        const id = attachment?.playerId ?? msg.userId ?? "";
+        await this.handleRelocate(id);
+        break;
+      }
 
       case "next":
         if (this.denyIfNotHost(ws, "次のラウンドへ進む")) return;
@@ -440,6 +470,22 @@ export class GameRoom extends DurableObject<Env> {
     const now = Date.now();
     if (now - (this.lastGuessAt.get(userId) ?? 0) < GUESS_COOLDOWN_MS) return;
     this.lastGuessAt.set(userId, now);
+
+    if (this.gameState.mode === "search" && userId === this.gameState.runnerId) {
+      ws.send(
+        JSON.stringify({
+          type: "result",
+          distanceKm: null,
+          correct: false,
+          score: 0,
+          proximity: null,
+          bearing: null,
+          roundOver: false,
+          runnerBlocked: true,
+        })
+      );
+      return;
+    }
 
     const guess = { lat, lng };
     const target = this.gameState.runnerPosition;
@@ -522,7 +568,8 @@ export class GameRoom extends DurableObject<Env> {
     this.recordGuess(userId, playerName, guess, distanceKm, score);
 
     const answered = Object.keys(this.gameState.classicAnswers).length;
-    const total = this.playerCount();
+    const total =
+      this.gameState.mode === "search" ? Math.max(1, this.playerCount() - 1) : this.playerCount();
 
     if (answered < total) {
       ws.send(
@@ -555,6 +602,20 @@ export class GameRoom extends DurableObject<Env> {
     let best: ClassicAnswer | null = null;
     for (const [, ans] of entries) {
       if (!best || ans.distanceKm < best.distanceKm) best = ans;
+    }
+
+    // Search & Chase: 逃走者は「追手の平均点が低いほど」高得点。
+    // 誰も回答しなかった(全員時間切れ)ラウンドは満点で逃げ切り
+    if (this.gameState.mode === "search" && this.gameState.runnerId) {
+      const mean =
+        entries.length > 0
+          ? entries.reduce((sum, [, a]) => sum + a.score, 0) / entries.length
+          : 0;
+      const runnerScore = Math.max(0, 5000 - Math.round(mean));
+      this.awardScore(this.gameState.runnerId, this.playerLabel(this.gameState.runnerId), runnerScore, null);
+      this.notice(
+        `👣 逃走者 ${this.playerLabel(this.gameState.runnerId)} は +${runnerScore}点（追手の平均 ${Math.round(mean)}点）`
+      );
     }
 
     this.gameState.totalScore = this.roomTopScore();
@@ -594,6 +655,52 @@ export class GameRoom extends DurableObject<Env> {
     if (this.gameState.status === "finished") await this.saveFinalScore();
   }
 
+  /**
+   * Search & Chase: 逃走者の「逃げる」。追手の直近の回答から離れる方向へ、
+   * 車載360°の別地点に移動する(出題と同じ検証を通るので電車には乗れない)。
+   * 回答済みの追手の得点は回答時点の位置で確定済みなので変わらない。
+   */
+  private async handleRelocate(userId: string) {
+    const s = this.gameState;
+    if (s.mode !== "search" || s.status !== "running" || s.moving) return;
+    if (!userId || userId !== s.runnerId) return;
+    if (s.relocationsLeft <= 0) return;
+    if (!s.runnerPosition) return;
+
+    this.announceMoving(true);
+
+    const moved = await moveAI(
+      this.env.MAPILLARY_TOKEN,
+      s.region,
+      s.runnerPosition,
+      s.trail,
+      s.lastBearing,
+      s.roundGuesses,
+      this.env.SESSIONS
+    );
+
+    if (!moved?.spot) {
+      this.gameState.moving = false;
+      this.notice("逃走者は移動先を見つけられなかった…（回数は減りません）");
+      await this.persist();
+      this.broadcast(this.publicState());
+      return;
+    }
+
+    const position = moved.spot.point;
+    this.gameState.regionUsed = moved.region ?? this.gameState.regionUsed;
+    this.gameState.lastBearing = moved.bearing ?? this.gameState.lastBearing;
+    this.gameState.trail = [...this.gameState.trail, position].slice(-TRAIL_LENGTH);
+    this.applySpot(moved.spot, position);
+    this.gameState.relocationsLeft -= 1;
+    this.gameState.moving = false;
+    this.gameState.lastMoveAt = Date.now();
+
+    this.notice(`👣 逃走者が移動した！（このラウンド残り${this.gameState.relocationsLeft}回）`);
+    await this.persist();
+    this.broadcast(this.publicState());
+  }
+
   async revealNextHint() {
     if (this.gameState.status !== "running") return;
     if (this.gameState.revealedHintCount >= this.gameState.allHints.length) return;
@@ -604,11 +711,11 @@ export class GameRoom extends DurableObject<Env> {
     this.broadcast(this.publicState());
   }
 
-  async startClassicGame(region: RegionKey, timeLimitSeconds: number, rounds: number) {
+  async startClassicGame(mode: "classic" | "search", region: RegionKey, timeLimitSeconds: number, rounds: number) {
     await this.ctx.storage.deleteAlarm();
     this.gameState = {
       ...DEFAULT_STATE,
-      mode: "classic",
+      mode,
       region,
       regionUsed: region,
       timeLimitSeconds,
@@ -621,16 +728,30 @@ export class GameRoom extends DurableObject<Env> {
   }
 
   async startNextClassicRound() {
-    if (this.gameState.mode !== "classic" || this.gameState.status !== "reveal") return;
+    if (this.gameState.mode === "chase" || this.gameState.status !== "reveal") return;
     await this.beginClassicRound();
   }
 
   private async beginClassicRound() {
     this.announceMoving(true);
 
+    // Search & Chase: 逃走者がいなければ(初回/切断時)接続中からランダムに選ぶ
+    if (this.gameState.mode === "search") {
+      const online = [...this.onlineIds()];
+      if (!this.gameState.runnerId || !online.includes(this.gameState.runnerId)) {
+        const picked = online[Math.floor(Math.random() * online.length)] ?? null;
+        this.gameState.runnerId = picked;
+        if (picked) this.notice(`👣 ${this.playerLabel(picked)} が逃走者になりました！`);
+      }
+    }
+
     const { spot, region: used } = await this.resolveSpot(this.gameState.region, this.gameState.trail);
     const position = spot?.point ?? randomFallbackPoint(this.gameState.region);
-    const hints = await buildPlaceHints(position, this.env.SESSIONS, regionHintLevel(used));
+    // Search & Chase では逃走者が動くためヒント(地名)は成立しない
+    const hints =
+      this.gameState.mode === "search"
+        ? []
+        : await buildPlaceHints(position, this.env.SESSIONS, regionHintLevel(used));
     const now = Date.now();
 
     this.resetRoundScores();
@@ -649,6 +770,7 @@ export class GameRoom extends DurableObject<Env> {
       classicAnswers: {},
       nextUpdateAt: 0,
       roundEndsAt: this.gameState.timeLimitSeconds > 0 ? now + this.gameState.timeLimitSeconds * 1000 : 0,
+      relocationsLeft: this.gameState.mode === "search" ? RELOCATIONS_PER_ROUND : 0,
       moving: false,
       lastMoveAt: now,
     };
@@ -732,7 +854,7 @@ export class GameRoom extends DurableObject<Env> {
     if (this.gameState.status !== "running") return;
     if (this.gameState.moving) return;
 
-    if (this.gameState.mode === "classic") {
+    if (this.gameState.mode !== "chase") {
       await this.settleClassicRound(true);
       return;
     }
@@ -914,12 +1036,15 @@ export class GameRoom extends DurableObject<Env> {
       intervalSeconds: Math.round(s.intervalMs / 1000),
       timeLimitSeconds: s.timeLimitSeconds,
       nextUpdateAt: s.mode === "chase" && s.status === "running" && !s.moving ? s.nextUpdateAt : 0,
-      roundEndsAt: s.mode === "classic" && s.status === "running" && !s.moving ? s.roundEndsAt : 0,
+      roundEndsAt: s.mode !== "chase" && s.status === "running" && !s.moving ? s.roundEndsAt : 0,
       serverNow: Date.now(),
       players: this.playerCount(exclude),
       hostId: this.hostId(exclude),
       answered: Object.keys(s.classicAnswers).length,
       scoreboard: this.scoreboardList(exclude),
+      runnerId: s.mode === "search" ? s.runnerId : null,
+      runnerName: s.mode === "search" && s.runnerId ? this.playerLabel(s.runnerId) : null,
+      relocationsLeft: s.mode === "search" ? s.relocationsLeft : 0,
       moving: s.moving,
       lastMoveAt: s.lastMoveAt,
       revealedTrail: s.revealedTrail,

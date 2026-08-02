@@ -17,7 +17,6 @@ interface RegionItem {
 }
 
 const INTERVAL_OPTIONS = [
-  { seconds: 15, label: "15秒" },
   { seconds: 30, label: "30秒" },
   { seconds: 60, label: "1分" },
   { seconds: 180, label: "3分" },
@@ -31,6 +30,8 @@ const TIME_LIMIT_OPTIONS = [
   { seconds: 180, label: "3分" },
   { seconds: 300, label: "5分" },
   { seconds: 600, label: "10分" },
+  { seconds: 1800, label: "30分" },
+  { seconds: 2700, label: "45分" },
 ];
 
 const ROUND_OPTIONS = [1, 3, 5, 8, 10];
@@ -466,7 +467,7 @@ export default function App() {
     if (!state) return;
     const me = state.scoreboard?.find((p) => p.id === playerId);
     const rank = state.scoreboard?.findIndex((p) => p.id === playerId) ?? -1;
-    const modeLabel = state.mode === "chase" ? "逃走モード" : "通常モード";
+    const modeLabel = state.mode === "chase" ? "逃走モード" : state.mode === "search" ? "Search & Chase" : "通常モード";
     const rankText = rank >= 0 && (state.scoreboard?.length ?? 0) > 1
       ? `（${state.scoreboard!.length}人中 ${rank + 1}位）`
       : "";
@@ -617,6 +618,8 @@ export default function App() {
       ? explore
       : { imageId: state?.imageId ?? "", imageUrl: state?.imageUrl ?? "" };
 
+  const isRunner = state?.mode === "search" && Boolean(state.runnerId) && state.runnerId === playerId;
+
   const urgency = countdown ? (countdown.ratio < 0.15 ? "critical" : countdown.ratio < 0.4 ? "warn" : "calm") : "calm";
 
   // 「回答する」等のメイン操作。通常の下部バーと全画面モードのHUDで同じ挙動を共有する
@@ -643,6 +646,23 @@ export default function App() {
           : `あなた ${formatScore(myRank?.total ?? 0)}点（ホスト待ち）`,
       };
     }
+    if (isRunner) {
+      const left = state?.relocationsLeft ?? 0;
+      return {
+        onClick: () => {
+          if (!send({ type: "relocate" })) showToast("接続が切れています");
+        },
+        disabled: !isRunning || isMoving || left <= 0,
+        title: "追手の回答から離れた別の地点へ逃げます",
+        label: isMoving
+          ? "逃走中…"
+          : !isRunning
+          ? "スタート待ち"
+          : left > 0
+          ? `🏃 逃げる！ 別の場所へ（残り${left}回）`
+          : "移動は使い切った…追手を待つ",
+      };
+    }
     return {
       onClick: submitGuess,
       disabled: !guessPin || !isRunning || isMoving || waitingOthers,
@@ -650,7 +670,7 @@ export default function App() {
       label: isMoving
         ? "逃走者が移動中…"
         : waitingOthers
-        ? `他の人を待っています（${answered}/${players}人）`
+        ? `他の人を待っています（${answered}/${state?.mode === "search" ? Math.max(1, players - 1) : players}人）`
         : !isRunning
         ? isHost
           ? "スタートすると回答できます"
@@ -674,6 +694,10 @@ export default function App() {
     nextRound,
     handleStart,
     submitGuess,
+    isRunner,
+    state?.relocationsLeft,
+    send,
+    showToast,
   ]);
 
   const streetCompact = isWide ? false : focusedPane !== "street";
@@ -782,6 +806,11 @@ export default function App() {
       </div>
 
       <div className="toolbar" role="group" aria-label="映像の操作">
+        {state?.mode === "search" && state.runnerName && !isIdle && (
+          <span className={`runner-chip${isRunner ? " is-me" : ""}`} title="Search & Chase の逃走役">
+            👣 {isRunner ? "あなたが逃走者！" : `逃走者: ${state.runnerName}`}
+          </span>
+        )}
         <button
           type="button"
           className="tool-btn"
@@ -984,6 +1013,10 @@ export default function App() {
             {mapCompact && <span className="pip-label">地図 ⤢</span>}
             <MapView
               onPick={(lat, lng) => {
+                if (isRunner) {
+                  showToast("あなたは逃走者。回答はできません（「逃げる！」で移動）");
+                  return;
+                }
                 setGuessPin({ lat, lng });
                 setExplorePin(null);
               }}
@@ -1011,6 +1044,9 @@ export default function App() {
                     <span className="hud-timer">
                       {isMoving ? "移動中" : countdown ? formatClock(countdown.seconds) : "—"}
                     </span>
+                    {state.mode === "search" && state.runnerName && (
+                      <span className="hud-runner">👣 {isRunner ? "あなたが逃走者！" : state.runnerName}</span>
+                    )}
                   </>
                 ) : (
                   <span className="hud-round">GeoChase</span>
@@ -1024,15 +1060,35 @@ export default function App() {
               >
                 ✕ 全画面終了
               </button>
-              <button
-                type="button"
-                className="primary-btn hud-action"
-                onClick={primaryAction.onClick}
-                disabled={primaryAction.disabled}
-                title={primaryAction.title}
-              >
-                {primaryAction.label}
-              </button>
+              <div className="hud-bar">
+                <button
+                  type="button"
+                  className={`hud-play${streetStatus.playback === "reverse" ? " is-on" : ""}`}
+                  onClick={() => streetRef.current?.togglePlayback("reverse")}
+                  disabled={!streetStatus.ready}
+                  title="逆再生"
+                >
+                  {streetStatus.playback === "reverse" ? "■" : "◀◀"}
+                </button>
+                <button
+                  type="button"
+                  className={`hud-play${streetStatus.playback === "forward" ? " is-on" : ""}`}
+                  onClick={() => streetRef.current?.togglePlayback("forward")}
+                  disabled={!streetStatus.ready}
+                  title="順再生"
+                >
+                  {streetStatus.playback === "forward" ? "■" : "▶▶"}
+                </button>
+                <button
+                  type="button"
+                  className="primary-btn hud-action"
+                  onClick={primaryAction.onClick}
+                  disabled={primaryAction.disabled}
+                  title={primaryAction.title}
+                >
+                  {primaryAction.label}
+                </button>
+              </div>
             </>
           )}
 
@@ -1095,8 +1151,9 @@ export default function App() {
                     onChange={(e) => setSettings((s) => ({ ...s, mode: e.target.value as Mode }))}
                     disabled={isRunning || !isHost}
                   >
-                    <option value="chase">逃走モード</option>
+                    <option value="chase">逃走モード（AIが逃げる）</option>
                     <option value="classic">通常モード</option>
+                    <option value="search">Search &amp; Chase（1人が逃げる対戦）</option>
                   </select>
                 </label>
 
@@ -1178,6 +1235,11 @@ export default function App() {
                 <p className="note">
                   点数はピンの距離から1人ずつ別々に計算されます。全員が回答するか時間切れでラウンドが終わり、
                   最後に累計スコアの順位が出ます。
+                </p>
+                <p className="note">
+                  <strong>Search &amp; Chase</strong>（2人以上）: 1人がランダムで逃走者になり、車載360°の地点を
+                  ラウンド中に最大2回まで移動できます。追手は今いる場所を当てて得点、
+                  逃走者は「追手の平均点が低いほど」高得点。ヒントはこのモードでは使えません。
                 </p>
                 <p className="note">設定を変えたら上の「スタート」でやり直します。</p>
 
@@ -1267,6 +1329,9 @@ export default function App() {
             {panel === "hints" && (
               <section className="panel">
                 <h2>ヒント</h2>
+                {state?.mode === "search" && (
+                  <p className="note">Search &amp; Chase では逃走者が動くため、ヒントは使えません。</p>
+                )}
                 {state && state.revealedHints.length > 0 ? (
                   <ol className="hint-list">
                     {state.revealedHints.map((h, i) => (
