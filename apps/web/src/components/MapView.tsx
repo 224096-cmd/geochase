@@ -86,9 +86,26 @@ async function buildJapaneseStyle(): Promise<unknown | null> {
       if (layout && layout["text-field"]) {
         layout["text-field"] = JA_NAME;
       }
-      // 建物名・店名（POI）を2ズーム早く出して密度を上げる
-      if (layer["source-layer"] === "poi" && layer.type === "symbol" && typeof layer.minzoom === "number") {
-        layer.minzoom = Math.max(12, layer.minzoom - 2);
+      // 建物名・店名（POI）: ランクによる間引きと遅い表示開始をやめ、
+      // 名前を持つ地物はズーム14以降すべて表示する
+      if (layer["source-layer"] === "poi" && layer.type === "symbol") {
+        if (typeof layer.minzoom === "number") layer.minzoom = Math.min(14, Math.max(12, layer.minzoom - 3));
+        // rank<=N のような間引きフィルタを外す(名前があるものは全部)
+        if (Array.isArray(layer.filter)) {
+          const stripRank = (f: any): any => {
+            if (!Array.isArray(f)) return f;
+            if (f.length >= 2 && (f[1] === "rank" || (Array.isArray(f[1]) && f[1][1] === "rank"))) return true;
+            if (f[0] === "all" || f[0] === "any") {
+              const inner = f.slice(1).map(stripRank).filter((x: any) => x !== true);
+              return inner.length > 0 ? [f[0], ...inner] : true;
+            }
+            return f;
+          };
+          const stripped = stripRank(layer.filter);
+          if (stripped === true) delete layer.filter;
+          else layer.filter = stripped;
+        }
+        layer.layout = { ...(layer.layout as any), "symbol-sort-key": ["coalesce", ["get", "rank"], 30] };
       }
       // 県名: 既定は maxzoom 8 で消えて英字斜体。日本語・太字でズーム12まで残す
       if (layer.id === "label_state") {
@@ -140,10 +157,67 @@ async function buildJapaneseStyle(): Promise<unknown | null> {
       },
     };
 
+    // 国道・県道・高速などの路線番号。標識風に色分けして道路上へ載せる
+    // (高速=緑 / 国道=青 / それ以外のref持ち=白地)
+    const roadRefBase = {
+      type: "symbol" as const,
+      source: srcId,
+      "source-layer": "transportation_name",
+      minzoom: 8,
+      layout: {
+        "symbol-placement": "line",
+        "symbol-spacing": 340,
+        "text-field": ["to-string", ["get", "ref"]],
+        "text-font": ["Noto Sans Bold"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 8, 9, 12, 11, 16, 13],
+        "text-rotation-alignment": "viewport",
+        "text-pitch-alignment": "viewport",
+        "text-padding": 2,
+      },
+    };
+    const hasRef = ["all", ["has", "ref"], ["!=", ["get", "ref"], ""]];
+    const refMotorway = {
+      ...roadRefBase,
+      id: "geochase-ref-motorway",
+      filter: ["all", hasRef, ["==", ["get", "class"], "motorway"]],
+      paint: {
+        "text-color": "#ffffff",
+        "text-halo-color": "#1e8a3c",
+        "text-halo-width": 2.4,
+      },
+    };
+    const refNational = {
+      ...roadRefBase,
+      id: "geochase-ref-national",
+      filter: ["all", hasRef, ["in", ["get", "class"], ["literal", ["trunk", "primary"]]]],
+      paint: {
+        "text-color": "#ffffff",
+        "text-halo-color": "#1a5fb4",
+        "text-halo-width": 2.4,
+      },
+    };
+    const refOther = {
+      ...roadRefBase,
+      id: "geochase-ref-other",
+      minzoom: 10,
+      filter: [
+        "all",
+        hasRef,
+        ["!", ["in", ["get", "class"], ["literal", ["motorway", "trunk", "primary"]]]],
+      ],
+      paint: {
+        "text-color": "#4a4034",
+        "text-halo-color": "#fff8e6",
+        "text-halo-width": 2.2,
+      },
+    };
+
     // ラベル（symbol）の直前に挿入して、文字が線に隠れないようにする
     const firstSymbol = style.layers.findIndex((l: any) => l.type === "symbol");
     const at = firstSymbol >= 0 ? firstSymbol : style.layers.length;
     style.layers.splice(at, 0, prefCasing, prefLine);
+    // 路線番号は最上位(他ラベルの上)に置く
+    style.layers.push(refMotorway, refNational, refOther);
     return style;
   } catch (err) {
     console.error("style build failed", err);

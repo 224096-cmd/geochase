@@ -26,4 +26,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           workingDirectory: apps/api
+          # 線路タイル([assets])はwrangler 3.78未満だと構成エラーで失敗する。
+          # アクション既定の古い版を使わないようバージョンを固定する
+          wranglerVersion: "3.114.1"
           command: deploy

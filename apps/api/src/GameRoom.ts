@@ -365,15 +365,15 @@ export class GameRoom extends DurableObject<Env> {
       const denied = this.rejectIfNotHost(body.playerId, "開始");
       if (denied) return denied;
 
-      if (body.mode === "search" && this.playerCount() < 2) {
+      if (body.mode === "search" && this.onlineIds().size < 2) {
         return Response.json(
           { ok: false, error: "Search & Chase は2人以上で遊べます（友達を招待してください）" },
           { status: 400 }
         );
       }
-      if (body.mode === "duel" && this.playerCount() !== 2) {
+      if (body.mode === "duel" && this.onlineIds().size !== 2) {
         return Response.json(
-          { ok: false, error: "対決モードはちょうど2人で遊びます（今は" + this.playerCount() + "人）" },
+          { ok: false, error: "対決モードはちょうど2人で遊びます（今は" + this.onlineIds().size + "人）" },
           { status: 400 }
         );
       }
