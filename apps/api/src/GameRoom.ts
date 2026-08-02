@@ -537,8 +537,12 @@ export class GameRoom extends DurableObject<Env> {
   }
 
   async handleGuess(ws: WebSocket, lat: number, lng: number, userId: string, playerName: string | null) {
-    if (this.gameState.status !== "running" || !this.gameState.runnerPosition) return;
-    if (this.gameState.moving) return;
+    if (this.gameState.status !== "running") return;
+    // 対決はターゲットが相手の隠し場所なので runnerPosition/moving に依存しない
+    if (this.gameState.mode !== "duel") {
+      if (!this.gameState.runnerPosition) return;
+      if (this.gameState.moving) return;
+    }
     if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return;
 
     const now = Date.now();
@@ -575,7 +579,8 @@ export class GameRoom extends DurableObject<Env> {
     }
 
     const guess = { lat, lng };
-    const target = this.gameState.runnerPosition;
+    // ここに来るのは classic / chase / search(live) のみ。冒頭ガードで非nullを保証済み
+    const target = this.gameState.runnerPosition!;
     const distanceKm = haversineKm(guess, target);
 
     this.gameState.roundGuesses = [...this.gameState.roundGuesses, guess].slice(-PURSUIT_MEMORY);
@@ -650,10 +655,6 @@ export class GameRoom extends DurableObject<Env> {
       this.tell(ws, "この対決の参加者ではありません");
       return;
     }
-
-    const now = Date.now();
-    if (now - (this.lastGuessAt.get(userId) ?? 0) < GUESS_COOLDOWN_MS) return;
-    this.lastGuessAt.set(userId, now);
 
     const oppId = ids.find((x) => x !== userId)!;
     const target = s.duel[oppId].spot.point;
@@ -1090,6 +1091,10 @@ export class GameRoom extends DurableObject<Env> {
     const hopKm = haversineKm(s.runnerPosition, { lat, lng });
     if (hopKm > MOVE_CAP_KM) {
       this.tell(ws, `一度に移動できるのは${MOVE_CAP_KM}kmまでです（今は${hopKm.toFixed(1)}km先）`);
+      return;
+    }
+    if (hopKm < 0.03) {
+      this.tell(ws, "すでにその場所にいます（間隔は消費しません）");
       return;
     }
 

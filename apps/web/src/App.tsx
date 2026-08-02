@@ -452,8 +452,15 @@ export default function App() {
     }
   }, [stop, showToast]);
 
+  const lastGuessSentRef = useRef(0);
   const submitGuess = useCallback(() => {
     if (!guessPin) return;
+    const nowMs = Date.now();
+    if (nowMs - lastGuessSentRef.current < 1500) {
+      showToast("連打防止中です。少し待ってからもう一度");
+      return;
+    }
+    lastGuessSentRef.current = nowMs;
     if (!send({ type: "guess", lat: guessPin.lat, lng: guessPin.lng, playerName })) {
       showToast("接続が切れています。復帰を待っています");
     }
@@ -679,6 +686,15 @@ export default function App() {
   useEffect(() => {
     if (!isRunner || state?.status !== "running") setRunnerPos(null);
   }, [isRunner, state?.status, state?.round]);
+
+  // 逃走者: 移動が成立したら下見候補と地図ピンを片付ける
+  // (残しておくと次の操作が意図せずジャンプ/旧候補への移動になる)
+  useEffect(() => {
+    if (!isRunner || !runnerPos) return;
+    setScoutPos(null);
+    scoutRef.current = null;
+    setGuessPin(null);
+  }, [isRunner, runnerPos]);
 
   // 対決: live なのに問題映像が未着なら sync で取り直す(取りこぼしの自己修復)
   useEffect(() => {
