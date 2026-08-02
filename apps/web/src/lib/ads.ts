@@ -7,7 +7,8 @@
  * 素材はすべてここに登録し、AdSlot が順番に切り替えて全部を露出させる。
  *
  * href   … クリック先（計測用リダイレクト）
- * img    … バナー画像
+ * img    … バナー画像。テキスト広告のときは持たない
+ * text   … テキスト広告の文言。画像広告のときは持たない
  * beacon … 表示計測用の1x1画像。素材ごとに必ず対で読み込む
  */
 export interface AdCreative {
@@ -16,7 +17,8 @@ export interface AdCreative {
   w: number;
   h: number;
   href: string;
-  img: string;
+  img?: string;
+  text?: string;
   beacon: string;
 }
 
@@ -247,6 +249,15 @@ export const RECT_ADS: AdCreative[] = [
     img: "https://www24.a8.net/svt/bgt?aid=260731177317&wid=001&eno=01&mid=s00000026285001011000&mc=1",
     beacon: "https://www14.a8.net/0.gif?a8mat=4B8DGP+58QFJM+5MTE+60OXD",
   },
+  {
+    id: "gyu-010",
+    sponsor: "やまなか家",
+    w: 250,
+    h: 250,
+    href: "https://px.a8.net/svt/ejp?a8mat=4B8DGP+58QFJM+5MTE+60H7L",
+    img: "https://www20.a8.net/svt/bgt?aid=260731177317&wid=001&eno=01&mid=s00000026285001010000&mc=1",
+    beacon: "https://www13.a8.net/0.gif?a8mat=4B8DGP+58QFJM+5MTE+60H7L",
+  },
 ];
 
 /** ヒントなど、プレイ中に開くパネル用の小さい枠（320x50・120x60・100x60） */
@@ -377,10 +388,93 @@ export const BANNER_ADS: AdCreative[] = [
     img: "https://www26.a8.net/svt/bgt?aid=260731177317&wid=001&eno=01&mid=s00000026285001014000&mc=1",
     beacon: "https://www14.a8.net/0.gif?a8mat=4B8DGP+58QFJM+5MTE+61C2P",
   },
+  {
+    id: "gyu-t004",
+    sponsor: "やまなか家",
+    w: 120,
+    h: 60,
+    href: "https://px.a8.net/svt/ejp?a8mat=4B8DGP+58QFJM+5MTE+5Z6WX",
+    img: "https://www21.a8.net/svt/bgt?aid=260731177317&wid=001&eno=01&mid=s00000026285001004000&mc=1",
+    beacon: "https://www17.a8.net/0.gif?a8mat=4B8DGP+58QFJM+5MTE+5Z6WX",
+  },
+  {
+    id: "gyu-text",
+    sponsor: "やまなか家",
+    w: 0,
+    h: 0,
+    href: "https://px.a8.net/svt/ejp?a8mat=4B8DGP+58QFJM+5MTE+5YRHE",
+    text: "本格的なお肉をご自宅で【やまなか家】",
+    beacon: "https://www15.a8.net/0.gif?a8mat=4B8DGP+58QFJM+5MTE+5YRHE",
+  },
+  {
+    id: "pixio-t011",
+    sponsor: "Pixio",
+    w: 120,
+    h: 60,
+    href: "https://px.a8.net/svt/ejp?a8mat=4B8DGP+HV0XE+XTI+15QP81",
+    img: "https://www22.a8.net/svt/bgt?aid=260731177030&wid=001&eno=01&mid=s00000004383007011000&mc=1",
+    beacon: "https://www17.a8.net/0.gif?a8mat=4B8DGP+HV0XE+XTI+15QP81",
+  },
+  {
+    id: "case-t005",
+    sponsor: "COVERARY",
+    w: 120,
+    h: 60,
+    href: "https://px.a8.net/svt/ejp?a8mat=4B8DGP+5EORLE+5V8G+5ZEMP",
+    img: "https://www23.a8.net/svt/bgt?aid=260731177327&wid=001&eno=01&mid=s00000027376001005000&mc=1",
+    beacon: "https://www13.a8.net/0.gif?a8mat=4B8DGP+5EORLE+5V8G+5ZEMP",
+  },
+  {
+    id: "case-t009",
+    sponsor: "COVERARY",
+    w: 120,
+    h: 60,
+    href: "https://px.a8.net/svt/ejp?a8mat=4B8DGP+5EORLE+5V8G+609HT",
+    img: "https://www28.a8.net/svt/bgt?aid=260731177327&wid=001&eno=01&mid=s00000027376001009000&mc=1",
+    beacon: "https://www17.a8.net/0.gif?a8mat=4B8DGP+5EORLE+5V8G+609HT",
+  },
 ];
 
 export type AdVariant = "rect" | "banner";
 
+/**
+ * 同じ広告主が続けて出ないように並べ替える。
+ * 素材が多い広告主（神戸クルーズなど）を素直に順番どおり出すと
+ * 同じ店の広告が何回も続いてしまうため、残数の多い順に取りつつ
+ * 直前と同じ広告主は避けて挟み込む。
+ */
+function interleaveBySponsor(list: AdCreative[]): AdCreative[] {
+  const groups = new Map<string, AdCreative[]>();
+  for (const ad of list) {
+    const bucket = groups.get(ad.sponsor);
+    if (bucket) bucket.push(ad);
+    else groups.set(ad.sponsor, [ad]);
+  }
+
+  const queues = [...groups.entries()].map(([sponsor, items]) => ({ sponsor, items }));
+  const out: AdCreative[] = [];
+  let previous = "";
+
+  while (out.length < list.length) {
+    const remaining = queues
+      .filter((q) => q.items.length > 0)
+      .sort((a, b) => b.items.length - a.items.length);
+    if (remaining.length === 0) break;
+    const pick = remaining.find((q) => q.sponsor !== previous) ?? remaining[0];
+    const next = pick.items.shift();
+    if (!next) break;
+    out.push(next);
+    previous = pick.sponsor;
+  }
+
+  return out;
+}
+
+const ROTATION: Record<AdVariant, AdCreative[]> = {
+  rect: interleaveBySponsor(RECT_ADS),
+  banner: interleaveBySponsor(BANNER_ADS),
+};
+
 export function adsFor(variant: AdVariant): AdCreative[] {
-  return variant === "rect" ? RECT_ADS : BANNER_ADS;
+  return ROTATION[variant];
 }

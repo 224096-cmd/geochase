@@ -1135,6 +1135,17 @@ code {
 
 .ad-slot-link { display: block; max-width: 100%; }
 
+/* 画像を持たないテキスト広告 */
+.ad-slot-text {
+  display: inline-block;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--signal);
+  text-decoration: underline;
+  text-align: center;
+}
+
 .ad-slot img {
   display: block;
   border: 0;
@@ -1309,7 +1320,8 @@ code {
   .stage[data-mode="street"] .pane-map,
   .stage[data-mode="map"] .pane-street {
     position: absolute;
-    right: 20px;
+    /* 右端はパネル（340px）が重なる領域なので、その手前に置く */
+    right: 360px;
     bottom: 20px;
     width: 260px;
     height: 172px;
@@ -1324,9 +1336,11 @@ code {
     pointer-events: none;
   }
 
-  /* 小窓と重なる位置のズームボタンを左へ逃がす */
+  /* 右に重なるパネル（340px）と小窓を避けてズームボタンを左へ逃がす */
+  .leaflet-bottom.leaflet-right .leaflet-control-zoom { margin-right: 352px; }
+
   .stage[data-mode="map"] .leaflet-bottom.leaflet-right .leaflet-control-zoom {
-    margin-right: 292px;
+    margin-right: 632px;
   }
 
   .stage-modes {
@@ -1343,13 +1357,46 @@ code {
     padding: 3px;
   }
 
+  /* 右のパネルは必要なときだけ出す。
+     閉じているあいだは地図とストリートビューが画面いっぱいに広がり、
+     タブと回答ボタンだけが右端に浮かぶ */
   .sidebar {
-    width: 320px;
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 340px;
+    z-index: 700;
     display: flex;
     flex-direction: column;
     min-height: 0;
-    border-left: 1px solid var(--line-soft);
+    background: transparent;
+    border-left: none;
+    padding: 10px 10px 10px 0;
+    gap: 8px;
+    /* 透けている部分は下の地図を操作できるようにする */
+    pointer-events: none;
   }
+
+  .sidebar > * { pointer-events: auto; }
+
+  /* パネルを開いたときだけ不透明な面になる */
+  .app:not([data-panel="none"]) .sidebar {
+    background: var(--surface);
+    border-left: 1px solid var(--line-soft);
+    padding: 0;
+    gap: 0;
+  }
+
+  .app[data-panel="none"] .panel-tabs,
+  .app[data-panel="none"] .actionbar {
+    background: rgb(7 12 11 / 90%);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+  }
+
+  /* 閉じているときの本文は、回答ボタンを下端へ押しやるための余白として使う */
+  .app[data-panel="none"] .panel-body { pointer-events: none; }
 
   .panel-tabs { order: -1; border-top: none; border-bottom: 1px solid var(--line-soft); }
 
