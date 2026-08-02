@@ -989,7 +989,7 @@ export class GameRoom extends DurableObject<Env> {
 
     if (!spot) {
       this.gameState.moving = false;
-      this.tell(ws, "その付近に車載の360°画像がありません。別の場所を選んでください");
+      this.tell(ws, "その付近に車載の360°画像がありません。地図の「🟢 360°の道」ボタンで緑の線を表示し、その近くを選んでください");
       this.broadcast(this.publicState());
       return;
     }

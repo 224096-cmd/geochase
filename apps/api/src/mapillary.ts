@@ -860,8 +860,11 @@ async function verifyCarSequence(token: string, sequenceId: string | undefined, 
   return ok;
 }
 
-async function verifyCarSequenceInner(token: string, sequenceId: string, budget: SearchBudget): Promise<boolean> {
-  if (!budget.take()) return false;
+async function verifyCarSequenceInner(token: string, sequenceId: string, _budget: SearchBudget): Promise<boolean> {
+  // 検索用の予算とは別枠。ここが枯れると全候補が不合格になり
+  // 「どこを選んでも画像なし」という事故になるため独立させる
+  const vb = new SearchBudget(3);
+  if (!vb.take()) return false;
 
   // 1) 全コマのID
   const idsRes = await fetchWithTimeout(
@@ -884,7 +887,7 @@ async function verifyCarSequenceInner(token: string, sequenceId: string, budget:
   for (let i = 0; i < ids.length && sampleIds.length < VERIFY_SAMPLE; i += step) sampleIds.push(ids[i]);
   if (sampleIds[sampleIds.length - 1] !== ids[ids.length - 1]) sampleIds.push(ids[ids.length - 1]);
 
-  if (!budget.take()) return false;
+  if (!vb.take()) return false;
   const detRes = await fetchWithTimeout(
     `${GRAPH_URL}?ids=${sampleIds.join(",")}&fields=id,geometry,computed_geometry,captured_at&access_token=${token}`
   );
@@ -1293,6 +1296,10 @@ export async function nearestImage(
 
   const excluded = new Set<TransportMode>(["foot", "cycle", "rail_or_boat", "air"]);
 
+  // 1リクエスト内で全ルート検証を試す本数の上限(応答時間の保険)
+  let verifyTries = 0;
+  const VERIFY_TRY_LIMIT = 5;
+
   for (const strict of [true, false]) {
     for (const s of sorted) {
       const merged = merge(s);
@@ -1302,7 +1309,11 @@ export async function nearestImage(
       if (carOnly && excluded.has(transport)) continue;
       if (strict && carOnly && transport !== "car") continue;
       // 採用直前の最終関門: ルート全体を見て電車・断片を確実に落とす
-      if (carOnly && !(await verifyCarSequence(token, merged.sequence, budget))) continue;
+      if (carOnly) {
+        if (verifyTries >= VERIFY_TRY_LIMIT) continue;
+        verifyTries++;
+        if (!(await verifyCarSequence(token, merged.sequence, budget))) continue;
+      }
       return toSpot(merged, { transport: carOnly ? "car" : transport });
     }
   }
@@ -1315,7 +1326,11 @@ export async function nearestImage(
     if (panoOnly && img.is_pano !== true) continue;
     const transport = classifyTransport(img.sequence ? stats.get(img.sequence) : undefined, img);
     if (carOnly && excluded.has(transport)) continue;
-    if (carOnly && !(await verifyCarSequence(token, img.sequence, budget))) continue;
+    if (carOnly) {
+      if (verifyTries >= VERIFY_TRY_LIMIT) continue;
+      verifyTries++;
+      if (!(await verifyCarSequence(token, img.sequence, budget))) continue;
+    }
     return toSpot(img, { transport: carOnly ? "car" : transport });
   }
   return null;

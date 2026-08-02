@@ -14,6 +14,11 @@ function makePinIcon(color: string) {
   });
 }
 
+const MLY_TOKEN = import.meta.env.VITE_MAPILLARY_TOKEN as string | undefined;
+const MLY_TILES = MLY_TOKEN
+  ? `https://tiles.mapillary.com/maps/vtp/mly1_public/2/{z}/{x}/{y}?access_token=${MLY_TOKEN}`
+  : null;
+
 const guessPinIcon = makePinIcon("#E0483E");
 
 // Search & Chase: 逃走者の「移動先候補」(映像で下見している場所)
@@ -238,6 +243,8 @@ interface Props {
   compact?: boolean;
   onExplore?: () => void;
   exploreLoading?: boolean;
+  /** 場所選び中: 360°カバレッジ(緑線)を自動で表示する */
+  coverageHint?: boolean;
   panTo?: LatLng | null;
 }
 
@@ -252,10 +259,55 @@ export default function MapView({
   compact = false,
   onExplore,
   exploreLoading = false,
+  coverageHint = false,
   panTo = null,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
+  // 撮影カバレッジの重ね表示: 緑=360°(候補になれる道) / 灰青=平面のみ
+  const [showPano, setShowPano] = useState(false);
+  const [showFlat, setShowFlat] = useState(false);
+  const glMapRef = useRef<any>(null);
+
+  const ensureCoverageLayers = (gl: any) => {
+    if (!MLY_TILES || !gl || gl.getSource("mly-coverage")) return;
+    try {
+      gl.addSource("mly-coverage", {
+        type: "vector",
+        tiles: [MLY_TILES],
+        minzoom: 0,
+        maxzoom: 14,
+      });
+      gl.addLayer({
+        id: "mly-flat",
+        type: "line",
+        source: "mly-coverage",
+        "source-layer": "sequence",
+        filter: ["!=", ["get", "is_pano"], true],
+        layout: { visibility: "none", "line-cap": "round" },
+        paint: {
+          "line-color": "#6b8cae",
+          "line-opacity": 0.75,
+          "line-width": ["interpolate", ["linear"], ["zoom"], 6, 0.8, 12, 1.6, 16, 2.4],
+        },
+      });
+      gl.addLayer({
+        id: "mly-pano",
+        type: "line",
+        source: "mly-coverage",
+        "source-layer": "sequence",
+        filter: ["==", ["get", "is_pano"], true],
+        layout: { visibility: "none", "line-cap": "round" },
+        paint: {
+          "line-color": "#17b26a",
+          "line-opacity": 0.9,
+          "line-width": ["interpolate", ["linear"], ["zoom"], 6, 1.4, 12, 2.6, 16, 3.6],
+        },
+      });
+    } catch (err) {
+      console.error("coverage layers failed", err);
+    }
+  };
   const guessMarker = useRef<L.Marker | null>(null);
   const targetMarker = useRef<L.Marker | null>(null);
   const resultLine = useRef<L.Polyline | null>(null);
@@ -378,6 +430,18 @@ export default function MapView({
           // 加工に失敗した場合は素の bright スタイルURLで動かす
           style: style ?? OFM_STYLE_URL,
         });
+        const vb: any = vectorBase.current;
+        const grabGl = () => {
+          try {
+            const gl = vb?.getMaplibreMap?.();
+            if (!gl) return;
+            glMapRef.current = gl;
+            if (gl.isStyleLoaded?.()) ensureCoverageLayers(gl);
+            else gl.once?.("load", () => ensureCoverageLayers(gl));
+          } catch {}
+        };
+        vb?.on?.("add", grabGl);
+        grabGl();
 
         if (layerRef.current === "map" && mapRef.current && vectorBase.current) {
           mapRef.current.removeLayer(raster);
@@ -454,6 +518,21 @@ export default function MapView({
     }
     guessMarker.current.dragging?.[locked ? "disable" : "enable"]();
   }, [markerPosition, locked]);
+
+  useEffect(() => {
+    if (coverageHint) setShowPano(true);
+  }, [coverageHint]);
+
+  // カバレッジ表示の切替をGLレイヤーへ反映
+  useEffect(() => {
+    const gl = glMapRef.current;
+    if (!gl) return;
+    ensureCoverageLayers(gl);
+    try {
+      if (gl.getLayer("mly-pano")) gl.setLayoutProperty("mly-pano", "visibility", showPano ? "visible" : "none");
+      if (gl.getLayer("mly-flat")) gl.setLayoutProperty("mly-flat", "visibility", showFlat ? "visible" : "none");
+    } catch {}
+  }, [showPano, showFlat]);
 
   // 逃走者の自位置マーカー(青い点)。位置が来たら出し、消えたら片付ける
   const runnerMarker = useRef<L.Marker | null>(null);
@@ -581,6 +660,33 @@ export default function MapView({
   return (
     <div className={`map-wrap${compact ? " is-compact" : ""}`}>
       <div ref={containerRef} className="map-canvas" />
+
+      {MLY_TILES && !compact && (
+        <div className="map-layers" role="group" aria-label="撮影データの表示">
+          <button
+            type="button"
+            className={`map-layer-btn${showPano ? " is-on" : ""}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowPano((v) => !v);
+            }}
+            title="車載を含む360°パノラマがある道を緑の線で表示します(隠れ場所に選べるのはこの近く)"
+          >
+            🟢 360°の道
+          </button>
+          <button
+            type="button"
+            className={`map-layer-btn${showFlat ? " is-on" : ""}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowFlat((v) => !v);
+            }}
+            title="360°ではない撮影(平面写真)だけがある道を表示します(隠れ場所には選べません)"
+          >
+            ⚪ 平面のみの道
+          </button>
+        </div>
+      )}
 
       {tilesLoading && !compact && (
         <div className="map-loading" role="status">

@@ -349,6 +349,40 @@ code {
 .tool-btn.is-on { background: var(--brand); border-color: var(--brand); color: #fff; }
 .tool-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+/* 撮影カバレッジの切替(地図左上) */
+.map-layers {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 940;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.map-layer-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgb(0 0 0 / 15%);
+  background: rgb(255 255 255 / 94%);
+  color: #37413f;
+  font-size: 10.5px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 18%);
+  white-space: nowrap;
+}
+
+.map-layer-btn.is-on { background: #103c2f; color: #eafff5; border-color: #17b26a; }
+
+@media (max-width: 899px) {
+  .map-layers { top: 8px; left: 8px; }
+  .map-layer-btn { padding: 5px 9px; font-size: 10px; }
+}
+
 /* 場所選び中の案内。映像ペイン上部に出すだけで、操作は一切ブロックしない */
 .setup-note {
   position: absolute;

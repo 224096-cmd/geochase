@@ -1187,6 +1187,7 @@ export default function App() {
               compact={mapCompact}
               onExplore={guessPin && isRunning && !isMoving ? exploreHere : undefined}
               exploreLoading={exploreLoading}
+              coverageHint={Boolean(needsToPlace)}
               runnerPos={isRunner ? runnerPos : null}
               scoutPos={isRunner && state?.phase === "live" ? scoutPos : null}
               panTo={isRunner ? scoutPos ?? runnerPos : streetSource === "explore" ? explorePin : null}
