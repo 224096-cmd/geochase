@@ -203,7 +203,7 @@ export default function MapView({
     }).setView([35.681, 139.767], 4);
 
     // Googleマップと同じくズームは右下
-    L.control.zoom({ position: "bottomright" }).addTo(map);
+    // ズームの＋−ボタンは置かない。ピンチ/ホイール/ダブルタップで操作する
 
     const photo = L.layerGroup();
     if (WORLD_PHOTO_URL) {

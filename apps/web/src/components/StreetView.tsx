@@ -402,21 +402,6 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
     } catch {}
   }, []);
 
-  const zoomIn = useCallback(
-    (e: React.MouseEvent) => {
-      e.stopPropagation();
-      applyZoom(zoomRef.current + 0.7);
-    },
-    [applyZoom]
-  );
-
-  const zoomOut = useCallback(
-    (e: React.MouseEvent) => {
-      e.stopPropagation();
-      applyZoom(zoomRef.current - 0.7);
-    },
-    [applyZoom]
-  );
 
   const resetView = useCallback(
     (e: React.MouseEvent) => {
@@ -675,12 +660,6 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
             <span className="compass-text">
               {shownBearing == null ? "—" : `${dirLabel} ${shownBearing}°`}
             </span>
-          </button>
-          <button type="button" className="street-btn" onClick={zoomIn} aria-label="拡大">
-            ＋
-          </button>
-          <button type="button" className="street-btn" onClick={zoomOut} aria-label="縮小">
-            −
           </button>
           <button type="button" className="street-btn is-wide" onClick={resetView} title="進行方向（正面）を向きます">
             正面

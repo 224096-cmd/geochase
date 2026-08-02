@@ -704,6 +704,274 @@ function meetsTier(spot: StreetSpot, age: number, neighbors: number, seqLength: 
   return true;
 }
 
+/* ============================================================
+   走行シーケンスの最終検証（電車を絶対に出さないための2段構え）
+
+   従来の判定は「検索矩形に入ったコマだけ」の統計だったため、
+   矩形を数コマで通過する電車が統計不足(unknown)になったり、
+   駅で停車する電車が「減速あり」で車と誤判定される穴があった。
+
+   ここでは採用直前の1本に絞って、
+   1) 全コマIDを取り等間隔サンプルでルート全体の統計を取り直す
+   2) OpenStreetMapの線路データと突き合わせ、
+      「線路の上を線路と平行に走っている」ものを弾く
+   を行う。判定はシーケンス単位でメモ化する。
+   ============================================================ */
+
+const VERIFY_SAMPLE = 14;
+const verifyCache = new Map<string, boolean>();
+
+interface RouteSample {
+  lat: number;
+  lng: number;
+  t: number;
+}
+
+interface RouteStats {
+  spanKm: number;
+  durationSec: number;
+  avgSpeed: number;
+  maxLegSpeed: number;
+  turnPerKm: number | null;
+}
+
+function routeStats(samples: RouteSample[]): RouteStats | null {
+  if (samples.length < 3) return null;
+  let spanKm = 0;
+  let turnSum = 0;
+  let maxLeg = 0;
+  let prevBearing: number | null = null;
+  for (let i = 1; i < samples.length; i++) {
+    const a = { lat: samples[i - 1].lat, lng: samples[i - 1].lng };
+    const b = { lat: samples[i].lat, lng: samples[i].lng };
+    const km = haversineKmLocal(a, b);
+    const dt = Math.abs(samples[i].t - samples[i - 1].t) / 1000;
+    if (dt > 0.5) maxLeg = Math.max(maxLeg, (km * 1000) / dt);
+    if (km > 0.003) {
+      spanKm += km;
+      const br = bearingDeg(a, b);
+      if (prevBearing !== null) turnSum += angleDiff(br, prevBearing);
+      prevBearing = br;
+    }
+  }
+  const durationSec = Math.abs(samples[samples.length - 1].t - samples[0].t) / 1000;
+  if (durationSec <= 0) return null;
+  return {
+    spanKm,
+    durationSec,
+    avgSpeed: (spanKm * 1000) / durationSec,
+    maxLegSpeed: maxLeg,
+    turnPerKm: spanKm > 0.15 ? turnSum / spanKm : null,
+  };
+}
+
+function segDistanceKm(p: LatLng, a: LatLng, b: LatLng): { d: number; bearing: number } {
+  // 短距離なので平面近似で十分
+  const kx = 111.32 * Math.cos((p.lat * Math.PI) / 180);
+  const ky = 110.57;
+  const ax = (a.lng - p.lng) * kx;
+  const ay = (a.lat - p.lat) * ky;
+  const bx = (b.lng - p.lng) * kx;
+  const by = (b.lat - p.lat) * ky;
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 > 0 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2)) : 0;
+  const cx = ax + t * dx;
+  const cy = ay + t * dy;
+  return { d: Math.sqrt(cx * cx + cy * cy), bearing: bearingDeg(a, b) };
+}
+
+interface OverpassWay {
+  tags?: Record<string, string>;
+  geometry?: { lat: number; lon: number }[];
+}
+
+/**
+ * サンプル点の周辺にある線路と道路を1回のOverpassクエリで取得し、
+ * 各点が「最寄りの線路の上（かつ進行方向が線路と平行）で、
+ * どの道路よりも線路に近い」かを数える。
+ * 線路沿いの並走道路は道路のほうが近くなるので誤爆しない。
+ * 失敗時は null（呼び出し側が統計だけで安全側に判断する）。
+ */
+async function railHits(points: { p: LatLng; travelBearing: number }[]): Promise<number | null> {
+  if (points.length === 0) return 0;
+  const rail = points
+    .map(({ p }) => `way(around:26,${p.lat.toFixed(6)},${p.lng.toFixed(6)})[railway~"^(rail|light_rail|subway|tram|monorail|narrow_gauge|funicular)$"];`)
+    .join("");
+  const road = points
+    .map(({ p }) => `way(around:26,${p.lat.toFixed(6)},${p.lng.toFixed(6)})[highway~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|living_street|road|motorway_link|trunk_link|primary_link|secondary_link)$"];`)
+    .join("");
+  const query = `[out:json][timeout:5];(${rail}${road});out tags geom 80;`;
+
+  // 公開Overpassは識別可能なUser-Agentが必須(無いと406)。本家が落ちていたらミラーを試す
+  const endpoints = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+  ];
+  let ways: OverpassWay[] | null = null;
+  for (const endpoint of endpoints) {
+    const res = await fetchWithTimeout(
+      endpoint,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "User-Agent": "GeoChase/1.0 (rail-check for game spot vetting)",
+          Accept: "application/json",
+        },
+        body: `data=${encodeURIComponent(query)}`,
+      },
+      4500
+    );
+    if (!res || !res.ok) continue;
+    try {
+      const data = (await res.json()) as { elements?: OverpassWay[] };
+      ways = data.elements ?? [];
+      break;
+    } catch {
+      continue;
+    }
+  }
+  if (ways === null) return null;
+
+  const rails: OverpassWay[] = [];
+  const roads: OverpassWay[] = [];
+  for (const w of ways) {
+    if (!w.geometry || w.geometry.length < 2) continue;
+    if (w.tags?.railway) {
+      if (w.tags.tunnel === "yes" || w.tags.tunnel === "building_passage") continue; // 地下線は地上の車と無関係
+      rails.push(w);
+    } else if (w.tags?.highway) {
+      roads.push(w);
+    }
+  }
+
+  const nearest = (p: LatLng, list: OverpassWay[], needBearing: number | null): number | null => {
+    let best: number | null = null;
+    for (const w of list) {
+      const g = w.geometry!;
+      for (let i = 1; i < g.length; i++) {
+        const { d, bearing } = segDistanceKm(
+          p,
+          { lat: g[i - 1].lat, lng: g[i - 1].lon },
+          { lat: g[i].lat, lng: g[i].lon }
+        );
+        if (needBearing !== null) {
+          const diff = angleDiff(bearing, needBearing);
+          if (Math.min(diff, 180 - diff) > 20) continue; // 平行でなければ線路とは数えない(踏切対策)
+        }
+        if (best === null || d < best) best = d;
+      }
+    }
+    return best;
+  };
+
+  let hits = 0;
+  for (const { p, travelBearing } of points) {
+    const dRail = nearest(p, rails, travelBearing);
+    if (dRail === null || dRail > 0.02) continue; // 20m以内でなければ線路上ではない
+    const dRoad = nearest(p, roads, null);
+    if (dRoad !== null && dRoad <= dRail + 0.004) continue; // 道路のほうが近い→並走道路の車
+    hits++;
+  }
+  return hits;
+}
+
+/**
+ * このシーケンスが「車で道路を走ったもの」かをルート全体で最終確認する。
+ * true のときだけ出題・下見に採用してよい。
+ */
+async function verifyCarSequence(token: string, sequenceId: string | undefined, budget: SearchBudget): Promise<boolean> {
+  if (!token || !sequenceId) return false;
+  const cached = verifyCache.get(sequenceId);
+  if (cached !== undefined) return cached;
+
+  const ok = await verifyCarSequenceInner(token, sequenceId, budget);
+  if (verifyCache.size > 400) verifyCache.clear();
+  verifyCache.set(sequenceId, ok);
+  return ok;
+}
+
+async function verifyCarSequenceInner(token: string, sequenceId: string, budget: SearchBudget): Promise<boolean> {
+  if (!budget.take()) return false;
+
+  // 1) 全コマのID
+  const idsRes = await fetchWithTimeout(
+    `${GRAPH_URL}/image_ids?sequence_id=${encodeURIComponent(sequenceId)}&access_token=${token}`
+  );
+  if (!idsRes || !idsRes.ok) return false;
+  let ids: string[] = [];
+  try {
+    const data = (await idsRes.json()) as { data?: { id: string }[] };
+    ids = (data.data ?? []).map((x) => String(x.id));
+  } catch {
+    return false;
+  }
+  // 数コマだけの断片や単発写真は走行列として信用できないので出さない
+  if (ids.length < 6) return false;
+
+  // 2) 等間隔サンプルの位置と時刻
+  const step = Math.max(1, Math.floor(ids.length / VERIFY_SAMPLE));
+  const sampleIds: string[] = [];
+  for (let i = 0; i < ids.length && sampleIds.length < VERIFY_SAMPLE; i += step) sampleIds.push(ids[i]);
+  if (sampleIds[sampleIds.length - 1] !== ids[ids.length - 1]) sampleIds.push(ids[ids.length - 1]);
+
+  if (!budget.take()) return false;
+  const detRes = await fetchWithTimeout(
+    `${GRAPH_URL}?ids=${sampleIds.join(",")}&fields=id,geometry,computed_geometry,captured_at&access_token=${token}`
+  );
+  if (!detRes || !detRes.ok) return false;
+
+  const samples: RouteSample[] = [];
+  try {
+    const data = (await detRes.json()) as Record<string, RawImage>;
+    for (const id of sampleIds) {
+      const img = data[id];
+      if (!img || !hasCoords(img) || !img.captured_at) continue;
+      const c = coordOf(img);
+      samples.push({ lat: c.lat, lng: c.lng, t: img.captured_at });
+    }
+  } catch {
+    return false;
+  }
+  samples.sort((a, b) => a.t - b.t);
+
+  const st = routeStats(samples);
+  if (!st) return false;
+
+  // 3) ルート全体の統計で明らかな非・車を落とす
+  if (st.durationSec < 25 || st.spanKm < 0.2) return false; // 断片
+  if (st.avgSpeed > 42) return false; // 新幹線・飛行
+  if (st.maxLegSpeed > 55) return false;
+  if (st.maxLegSpeed < 8.5) return false; // 一度も車速に達しない＝徒歩・自転車・車内静止
+  if (st.avgSpeed < 2.0) return false;
+
+  // 統計だけで見た「電車らしさ」。線路照合が使えないときだけ効く安全弁なので、
+  // 幹線道路の車を巻き込まないよう「長距離・ほぼ無旋回・速い」に絞る
+  const suspicious = st.spanKm > 2 && (st.turnPerKm ?? 99) < 10 && st.avgSpeed > 10;
+
+  // 4) 線路照合（始・中・終の3点）。電車は必ず線路上を線路と平行に走る
+  if (samples.length >= 3 && st.spanKm > 0.35) {
+    const pick = [1, Math.floor(samples.length / 2), samples.length - 2].map((i) =>
+      Math.max(1, Math.min(samples.length - 2, i))
+    );
+    const points = [...new Set(pick)].map((i) => ({
+      p: { lat: samples[i].lat, lng: samples[i].lng },
+      travelBearing: bearingDeg(
+        { lat: samples[i - 1].lat, lng: samples[i - 1].lng },
+        { lat: samples[i + 1].lat, lng: samples[i + 1].lng }
+      ),
+    }));
+    const hits = await railHits(points);
+    if (hits === null) return !suspicious; // 照合不能なら疑わしいものは出さない
+    if (hits >= 2) return false; // 3点中2点以上が線路上＝電車
+    return true;
+  }
+
+  return !suspicious;
+}
+
 async function selectBestSpot(
   token: string,
   candidates: Candidate[],
@@ -740,13 +1008,20 @@ async function selectBestSpot(
       if (!spot.imageId) continue;
       if (!meetsTier(spot, c.ageYears, c.neighbors, c.seqLength, tier)) continue;
       if (!accept(spot)) continue;
+      // 採用直前の最終関門: ルート全体を見て電車・断片を確実に落とす
+      if (!(await verifyCarSequence(token, c.img.sequence, budget))) continue;
       return spot;
     }
   }
 
   // enriched は全てパノラマ＋車載なので、ここで返しても平面画像は混ざらない
-  const fallback = enriched.find((c) => accept(toSpot(c.img)));
-  return fallback ? toSpot(fallback.img, { neighbors: fallback.neighbors, transport: "car" }) : null;
+  for (const c of enriched) {
+    const spot = toSpot(c.img, { neighbors: c.neighbors, transport: "car" });
+    if (!accept(spot)) continue;
+    if (!(await verifyCarSequence(token, c.img.sequence, budget))) continue;
+    return spot;
+  }
+  return null;
 }
 
 interface Seed {
@@ -760,7 +1035,7 @@ const SEED_TTL_SEC = 60 * 60 * 24 * 60;
 
 // v3: パノラマ＋車載だけを保存する。v2以前の平面画像シードは使わない
 function seedKey(region: RegionKey): string {
-  return `seeds:v3:${region}`;
+  return `seeds:v4:${region}`;
 }
 
 async function loadSeeds(kv: KVNamespace | undefined, region: RegionKey): Promise<Seed[]> {
@@ -1004,14 +1279,12 @@ export async function nearestImage(
   let usable = farEnough.length > 0 ? farEnough : base;
 
   if (carOnly) {
-    const cars = usable.filter(
-      (img) => classifyTransport(img.sequence ? stats.get(img.sequence) : undefined, img) === "car"
-    );
-    if (cars.length > 0) usable = cars;
-    else
-      usable = usable.filter(
-        (img) => classifyTransport(img.sequence ? stats.get(img.sequence) : undefined, img) === "unknown"
-      );
+    // 電車を絶対に出さないため unknown 単独へのフォールバックはしない。
+    // 矩形内のコマ不足で判定不能な列は、後段の全ルート検証で白黒を付ける
+    usable = usable.filter((img) => {
+      const t = classifyTransport(img.sequence ? stats.get(img.sequence) : undefined, img);
+      return t === "car" || t === "unknown";
+    });
   }
   if (usable.length === 0) return null;
 
@@ -1043,7 +1316,9 @@ export async function nearestImage(
       const transport = classifyTransport(merged.sequence ? stats.get(merged.sequence) : undefined, merged);
       if (carOnly && excluded.has(transport)) continue;
       if (strict && carOnly && transport !== "car") continue;
-      return toSpot(merged, { transport });
+      // 採用直前の最終関門: ルート全体を見て電車・断片を確実に落とす
+      if (carOnly && !(await verifyCarSequence(token, merged.sequence, budget))) continue;
+      return toSpot(merged, { transport: carOnly ? "car" : transport });
     }
   }
 
@@ -1055,7 +1330,8 @@ export async function nearestImage(
     if (panoOnly && img.is_pano !== true) continue;
     const transport = classifyTransport(img.sequence ? stats.get(img.sequence) : undefined, img);
     if (carOnly && excluded.has(transport)) continue;
-    return toSpot(img, { transport });
+    if (carOnly && !(await verifyCarSequence(token, img.sequence, budget))) continue;
+    return toSpot(img, { transport: carOnly ? "car" : transport });
   }
   return null;
 }

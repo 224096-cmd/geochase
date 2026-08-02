@@ -694,22 +694,6 @@ code {
 /* 出典は記録タブへ移設済み。地図上には一切出さない */
 .leaflet-control-attribution { display: none !important; }
 
-/* Googleマップ風の白いズームボタン（右下） */
-.leaflet-control-zoom a {
-  background: #fff !important;
-  color: #444 !important;
-  border-color: #dadce0 !important;
-  width: 34px !important;
-  height: 34px !important;
-  line-height: 32px !important;
-}
-
-.leaflet-control-zoom a:hover { background: #f1f3f4 !important; }
-
-.leaflet-bottom .leaflet-control-zoom {
-  margin-bottom: 22px;
-  margin-right: 8px;
-}
 
 .leaflet-maplibre-gl-pane canvas { outline: none; }
 
@@ -1361,10 +1345,6 @@ code {
   }
 
 
-  /* パネルを開いているときだけ、その幅ぶんズームボタンを左へ逃がす */
-  .app:not([data-panel="none"]) .leaflet-bottom.leaflet-right .leaflet-control-zoom {
-    margin-right: 352px;
-  }
 
 
   /* 右側は必要なときだけ出す2状態:
@@ -1373,10 +1353,10 @@ code {
      [開] 右端に340pxの不透明なパネル面が現れる */
   .sidebar {
     position: absolute;
-    top: 10px;
-    right: 10px;
+    top: 8px;
+    right: 8px;
     bottom: auto;
-    width: 168px;
+    width: 118px;
     z-index: 700;
     display: flex;
     flex-direction: column;
@@ -1389,8 +1369,8 @@ code {
 
   .app[data-panel="none"] .panel-tabs {
     flex-direction: column;
-    gap: 3px;
-    padding: 4px;
+    gap: 2px;
+    padding: 3px;
     border: 1px solid var(--line);
     border-radius: var(--radius-sm);
     background: rgb(7 12 11 / 92%);
@@ -1400,11 +1380,13 @@ code {
     flex: none;
     width: 100%;
     text-align: left;
-    padding: 8px 10px;
+    padding: 5px 8px;
+    min-height: 0;
+    font-size: 10px;
   }
 
   .app[data-panel="none"] .actionbar {
-    padding: 5px;
+    padding: 4px;
     border: 1px solid var(--line);
     border-radius: var(--radius-sm);
     background: rgb(7 12 11 / 92%);
@@ -1413,10 +1395,10 @@ code {
   .app[data-panel="none"] .actionbar .wide {
     width: 100%;
     min-width: 0;
-    min-height: 46px;
-    padding: 8px 10px;
-    font-size: 12px;
-    line-height: 1.35;
+    min-height: 38px;
+    padding: 6px 8px;
+    font-size: 10.5px;
+    line-height: 1.3;
     white-space: normal;
   }
 
@@ -1482,12 +1464,6 @@ code {
 .app.is-immersive .street-btn.is-wide { width: auto; height: 26px; padding: 0 9px; font-size: 10px; }
 .app.is-immersive .map-btn { min-height: 28px; padding: 4px 9px; font-size: 10px; }
 .app.is-immersive .map-controls { left: 6px; bottom: 8px; gap: 4px; }
-.app.is-immersive .leaflet-bottom .leaflet-control-zoom { margin-bottom: 8px; margin-right: 6px; }
-.app.is-immersive .leaflet-control-zoom a {
-  width: 28px !important;
-  height: 28px !important;
-  line-height: 26px !important;
-}
 
 .hud-chip {
   position: absolute;
