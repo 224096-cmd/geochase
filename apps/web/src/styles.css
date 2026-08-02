@@ -349,8 +349,57 @@ code {
 .tool-btn.is-on { background: var(--brand); border-color: var(--brand); color: #fff; }
 .tool-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-/* 全画面ボタンはツールバーの右端へ */
+/* 全画面ボタンはツールバーの右端へ。入替ボタンがある場合はその左に付く */
+.tool-btn-swap { margin-inline-start: auto; }
+.tool-btn-swap ~ .tool-btn-end { margin-inline-start: 0; }
 .tool-btn-end { margin-inline-start: auto; }
+
+/* 走行ルートのシークバー。この道のどこを見るかを選べる */
+.street-seek {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(62%, 480px);
+  background: rgb(7 12 11 / 88%);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 12px;
+}
+
+.street-seek input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
+
+.street-seek-pos {
+  flex: 0 0 auto;
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.app.is-immersive .street-seek { bottom: 64px; }
+
+@media (max-width: 899px) {
+  /* 左下の小窓と重ならないよう右寄せにする */
+  .street-seek {
+    left: auto;
+    right: 8px;
+    transform: none;
+    width: min(70%, 340px);
+    padding: 6px 10px;
+    bottom: 10px;
+  }
+}
+
 
 .tool-select { flex: 0 0 auto; display: inline-flex; }
 
@@ -1311,138 +1360,104 @@ code {
     height: 72px;
   }
 
-  .stage[data-mode="street"] .pane-street,
-  .stage[data-mode="map"] .pane-map {
-    flex: 1 1 auto;
-    min-width: 0;
+
+  /* パネルを開いているときだけ、その幅ぶんズームボタンを左へ逃がす */
+  .app:not([data-panel="none"]) .leaflet-bottom.leaflet-right .leaflet-control-zoom {
+    margin-right: 352px;
   }
 
-  .stage[data-mode="street"] .pane-map,
-  .stage[data-mode="map"] .pane-street {
-    position: absolute;
-    /* 右端はパネル（340px）が重なる領域なので、その手前に置く */
-    right: 360px;
-    bottom: 20px;
-    width: 260px;
-    height: 172px;
-    flex: 0 0 auto;
-    z-index: 6;
-    cursor: pointer;
-    box-shadow: 0 10px 28px rgb(0 0 0 / 55%);
-  }
 
-  .stage[data-mode="street"] .pane-map > *,
-  .stage[data-mode="map"] .pane-street > * {
-    pointer-events: none;
-  }
-
-  /* 右に重なるパネル（340px）と小窓を避けてズームボタンを左へ逃がす */
-  .leaflet-bottom.leaflet-right .leaflet-control-zoom { margin-right: 352px; }
-
-  .stage[data-mode="map"] .leaflet-bottom.leaflet-right .leaflet-control-zoom {
-    margin-right: 632px;
-  }
-
-  .stage-modes {
-    position: absolute;
-    left: 50%;
-    bottom: 18px;
-    transform: translateX(-50%);
-    z-index: 700;
-    display: flex;
-    gap: 4px;
-    background: rgb(7 12 11 / 90%);
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    padding: 3px;
-  }
-
-  /* 右のパネルは必要なときだけ出す。
-     閉じているあいだは地図とストリートビューが画面いっぱいに広がり、
-     タブと回答ボタンだけが右端に浮かぶ */
+  /* 右側は必要なときだけ出す2状態:
+     [閉] 右上に小さな縦レール（タブ4つ＋回答ボタン）だけを浮かせ、
+          地図とストリートビューは画面の右端まで広がる
+     [開] 右端に340pxの不透明なパネル面が現れる */
   .sidebar {
     position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: 340px;
+    top: 10px;
+    right: 10px;
+    bottom: auto;
+    width: 168px;
     z-index: 700;
     display: flex;
     flex-direction: column;
     min-height: 0;
-    background: transparent;
-    border-left: none;
-    padding: 10px 10px 10px 0;
     gap: 8px;
-    /* 透けている部分は下の地図を操作できるようにする */
-    pointer-events: none;
   }
 
-  .sidebar > * { pointer-events: auto; }
+  /* --- 閉じているとき: 縦レール --- */
+  .app[data-panel="none"] .panel-body { display: none; }
 
-  /* パネルを開いたときだけ不透明な面になる */
-  .app:not([data-panel="none"]) .sidebar {
-    background: var(--surface);
-    border-left: 1px solid var(--line-soft);
-    padding: 0;
-    gap: 0;
-  }
-
-  .app[data-panel="none"] .panel-tabs,
-  .app[data-panel="none"] .actionbar {
-    background: rgb(7 12 11 / 90%);
+  .app[data-panel="none"] .panel-tabs {
+    flex-direction: column;
+    gap: 3px;
+    padding: 4px;
     border: 1px solid var(--line);
     border-radius: var(--radius-sm);
+    background: rgb(7 12 11 / 92%);
   }
 
-  /* 閉じているときの本文は、回答ボタンを下端へ押しやるための余白として使う */
-  .app[data-panel="none"] .panel-body { pointer-events: none; }
+  .app[data-panel="none"] .panel-tabs button {
+    flex: none;
+    width: 100%;
+    text-align: left;
+    padding: 8px 10px;
+  }
 
-  .panel-tabs { order: -1; border-top: none; border-bottom: 1px solid var(--line-soft); }
+  .app[data-panel="none"] .actionbar {
+    padding: 5px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: rgb(7 12 11 / 92%);
+  }
 
-  .panel-body {
+  .app[data-panel="none"] .actionbar .wide {
+    width: 100%;
+    min-width: 0;
+    min-height: 46px;
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.35;
+    white-space: normal;
+  }
+
+  /* --- 開いているとき: パネル面 --- */
+  .app:not([data-panel="none"]) .sidebar {
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 340px;
+    gap: 0;
+    background: var(--surface);
+    border-left: 1px solid var(--line-soft);
+  }
+
+  .app:not([data-panel="none"]) .panel-tabs {
+    order: -1;
+    border-top: none;
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .app:not([data-panel="none"]) .panel-body {
     display: block;
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
   }
 
-  .actionbar {
+  .app:not([data-panel="none"]) .actionbar {
     border-top: 1px solid var(--line-soft);
     justify-content: flex-end;
   }
 
-  .actionbar .wide { width: auto; min-width: 280px; }
+  .app:not([data-panel="none"]) .actionbar .wide { width: auto; min-width: 280px; }
 
   .toast { bottom: 88px; }
 }
 
 @media (min-width: 1400px) {
-  .sidebar { width: 360px; }
+  .app:not([data-panel="none"]) .sidebar { width: 360px; }
 }
 
-.stage-modes button {
-  background: transparent;
-  color: var(--muted);
-  border: none;
-  border-radius: 999px;
-  padding: 6px 14px;
-  min-height: 30px;
-  font-size: 11px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.stage-modes button.is-active { background: var(--brand); color: #fff; }
-
-.stage-modes.is-inline {
-  position: static;
-  transform: none;
-  display: flex;
-  background: var(--surface-2);
-}
-
-.stage-modes.is-inline button { flex: 1; min-height: 38px; font-size: 12px; }
 
 /* ============================================================
    全画面モード（映像と地図だけ。必要なボタンは画面端に小さく表示）
@@ -1450,8 +1465,7 @@ code {
 .app.is-immersive .topbar,
 .app.is-immersive .readout,
 .app.is-immersive .toolbar,
-.app.is-immersive .sidebar,
-.app.is-immersive .stage-modes {
+.app.is-immersive .sidebar {
   display: none;
 }
 

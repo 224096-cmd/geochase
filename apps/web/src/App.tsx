@@ -6,7 +6,7 @@ import InstallButton from "./components/InstallButton";
 import { API_URL, useGameRoom } from "./lib/useGameRoom";
 import { formatClock, formatDistance, formatScore, proximityMessage } from "./lib/format";
 import { getCredits } from "./lib/credits";
-import type { GuessResult, LatLng, Mode, StageMode, StartOptions } from "./lib/types";
+import type { GuessResult, LatLng, Mode, StartOptions } from "./lib/types";
 
 type PanelKey = "settings" | "hints" | "rank" | "history" | null;
 
@@ -147,20 +147,18 @@ function loadSettings(): StartOptions {
   }
 }
 
-function loadStage(): { mode: StageMode; split: number } {
+function loadStage(): { split: number; swapped: boolean } {
   try {
     const raw = localStorage.getItem(STAGE_KEY);
-    if (!raw) return { mode: "split", split: DEFAULT_SPLIT };
-    const parsed = JSON.parse(raw) as { mode?: StageMode; split?: number };
-    const mode: StageMode =
-      parsed.mode === "street" || parsed.mode === "map" ? parsed.mode : "split";
+    if (!raw) return { split: DEFAULT_SPLIT, swapped: false };
+    const parsed = JSON.parse(raw) as { split?: number; swapped?: boolean };
     const split =
       typeof parsed.split === "number" && Number.isFinite(parsed.split)
         ? Math.min(MAX_SPLIT, Math.max(MIN_SPLIT, parsed.split))
         : DEFAULT_SPLIT;
-    return { mode, split };
+    return { split, swapped: parsed.swapped === true };
   } catch {
-    return { mode: "split", split: DEFAULT_SPLIT };
+    return { split: DEFAULT_SPLIT, swapped: false };
   }
 }
 
@@ -186,7 +184,8 @@ export default function App() {
   const [tick, setTick] = useState(0);
 
   const initialStage = useRef(loadStage());
-  const [stageMode, setStageMode] = useState<StageMode>(initialStage.current.mode);
+  // 映像と地図の左右配置。true で地図が左になる
+  const [swapped, setSwapped] = useState(initialStage.current.swapped);
   const [split, setSplit] = useState(initialStage.current.split);
   const streetRef = useRef<StreetViewHandle>(null);
   const [streetStatus, setStreetStatus] = useState<StreetViewStatus>({
@@ -246,8 +245,8 @@ export default function App() {
   }, [playerName]);
 
   useEffect(() => {
-    localStorage.setItem(STAGE_KEY, JSON.stringify({ mode: stageMode, split }));
-  }, [stageMode, split]);
+    localStorage.setItem(STAGE_KEY, JSON.stringify({ split, swapped }));
+  }, [split, swapped]);
 
   useEffect(() => {
     localStorage.setItem(PLAY_LENGTH_KEY, String(playLength));
@@ -425,8 +424,7 @@ export default function App() {
       if (data?.found && data.imageId) {
         setExplore({ imageId: data.imageId, imageUrl: data.imageUrl ?? "" });
         setStreetSource("explore");
-        if (isWide) setStageMode("split");
-        else setFocusedPane("street");
+        if (!isWide) setFocusedPane("street");
       } else {
         showToast(data?.error ?? "この付近には車から撮影された360°画像がありません");
       }
@@ -502,8 +500,10 @@ export default function App() {
     const rect = el.getBoundingClientRect();
     if (rect.width <= 0) return;
     const ratio = (clientX - rect.left) / rect.width;
-    setSplit(Math.min(MAX_SPLIT, Math.max(MIN_SPLIT, ratio)));
-  }, []);
+    // split は常に「映像の割合」。入替中は映像が右側なので反転して解釈する
+    const streetRatio = swapped ? 1 - ratio : ratio;
+    setSplit(Math.min(MAX_SPLIT, Math.max(MIN_SPLIT, streetRatio)));
+  }, [swapped]);
 
   const startDrag = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -553,12 +553,11 @@ export default function App() {
         e.preventDefault();
         submitGuess();
       }
-      if (e.key.toLowerCase() === "m") {
-        if (isWide) setStageMode((m) => (m === "map" ? "split" : "map"));
-        else setFocusedPane((p) => (p === "street" ? "map" : "street"));
+      if (e.key.toLowerCase() === "m" && !isWide) {
+        setFocusedPane((p) => (p === "street" ? "map" : "street"));
       }
-      if (e.key.toLowerCase() === "v" && isWide) {
-        setStageMode((m) => (m === "street" ? "split" : "street"));
+      if (e.key.toLowerCase() === "x" && isWide) {
+        setSwapped((s) => !s);
       }
       if (e.key.toLowerCase() === "h" && state?.status === "running") requestHint();
       if (e.key.toLowerCase() === "f") toggleImmersive();
@@ -664,8 +663,8 @@ export default function App() {
     submitGuess,
   ]);
 
-  const streetCompact = isWide ? stageMode === "map" : focusedPane !== "street";
-  const mapCompact = isWide ? stageMode === "street" : focusedPane !== "map";
+  const streetCompact = isWide ? false : focusedPane !== "street";
+  const mapCompact = isWide ? false : focusedPane !== "map";
 
   if (!API_URL) {
     return (
@@ -841,6 +840,16 @@ export default function App() {
         >
           {streetStatus.seeking ? "探索中…" : "別の道へ"}
         </button>
+        {isWide && (
+          <button
+            type="button"
+            className="tool-btn tool-btn-swap"
+            onClick={() => setSwapped((s) => !s)}
+            title="映像と地図の左右を入れ替えます（X）"
+          >
+            ⇄ 入替
+          </button>
+        )}
         <button
           type="button"
           className="tool-btn tool-btn-end"
@@ -856,7 +865,7 @@ export default function App() {
           className="stage"
           ref={stageRef}
           data-focus={focusedPane}
-          data-mode={isWide ? stageMode : "focus"}
+          data-mode={isWide ? "split" : "focus"}
           style={
             {
               "--split-street": String(split),
@@ -866,7 +875,8 @@ export default function App() {
         >
           <section
             className="pane pane-street"
-            onClick={() => (isWide ? stageMode === "map" && setStageMode("split") : setFocusedPane("street"))}
+            style={isWide ? { order: swapped ? 3 : 1 } : undefined}
+            onClick={() => !isWide && setFocusedPane("street")}
             aria-label="ストリート画像"
           >
             {streetCompact ? (
@@ -912,9 +922,10 @@ export default function App() {
             />
           </section>
 
-          {isWide && stageMode === "split" && (
+          {isWide && (
             <div
               className="stage-split"
+              style={{ order: 2 }}
               role="separator"
               aria-orientation="vertical"
               aria-label="映像と地図の比率"
@@ -936,7 +947,8 @@ export default function App() {
 
           <section
             className="pane pane-map"
-            onClick={() => (isWide ? stageMode === "street" && setStageMode("split") : setFocusedPane("map"))}
+            style={isWide ? { order: swapped ? 1 : 3 } : undefined}
+            onClick={() => !isWide && setFocusedPane("map")}
             aria-label="地図"
           >
             {mapCompact && <span className="pip-label">地図 ⤢</span>}
@@ -956,34 +968,6 @@ export default function App() {
             />
           </section>
 
-          {isWide && (
-            <div className="stage-modes" role="group" aria-label="表示の割り当て">
-              <button
-                type="button"
-                className={stageMode === "street" ? "is-active" : ""}
-                onClick={() => setStageMode("street")}
-                title="映像だけを大きく表示（V）"
-              >
-                映像
-              </button>
-              <button
-                type="button"
-                className={stageMode === "split" ? "is-active" : ""}
-                onClick={() => setStageMode("split")}
-                title="左右に並べる。仕切りのドラッグで比率を変えられます"
-              >
-                左右
-              </button>
-              <button
-                type="button"
-                className={stageMode === "map" ? "is-active" : ""}
-                onClick={() => setStageMode("map")}
-                title="地図だけを大きく表示（M）"
-              >
-                地図
-              </button>
-            </div>
-          )}
 
           {immersive && (
             <>
@@ -1167,38 +1151,12 @@ export default function App() {
                 </p>
                 <p className="note">設定を変えたら上の「スタート」でやり直します。</p>
 
-                {isWide && (
-                  <>
-                    <h2>画面の割り当て</h2>
-                    <div className="stage-modes is-inline" role="group" aria-label="表示の割り当て">
-                      <button
-                        type="button"
-                        className={stageMode === "street" ? "is-active" : ""}
-                        onClick={() => setStageMode("street")}
-                      >
-                        映像だけ
-                      </button>
-                      <button
-                        type="button"
-                        className={stageMode === "split" ? "is-active" : ""}
-                        onClick={() => setStageMode("split")}
-                      >
-                        左右に並べる
-                      </button>
-                      <button
-                        type="button"
-                        className={stageMode === "map" ? "is-active" : ""}
-                        onClick={() => setStageMode("map")}
-                      >
-                        地図だけ
-                      </button>
-                    </div>
-                    <p className="note">
-                      左右に並べているときは、映像と地図のあいだの仕切りをドラッグすると比率を変えられます。
-                      ダブルクリックで半々に戻ります（キーボードは ← → ）。
-                      V で映像だけ、M で地図だけに切り替わります。
-                    </p>
-                  </>
+          {isWide && (
+                  <p className="note">
+                    映像と地図のあいだの仕切りをドラッグすると比率を変えられます。
+                    ダブルクリックで半々に戻ります（キーボードは ← → ）。
+                    左右の入れ替えは上の操作バーの「⇄ 入替」から（キーボードは X ）。
+                  </p>
                 )}
 
                 <h2>ルーム</h2>

@@ -84,6 +84,13 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
   const [bearing, setBearing] = useState<number | null>(null);
   const bearingRef = useRef<number | null>(null);
 
+  // 走行ルート（シーケンス）の全コマ。シークバーで任意の位置へ飛べるようにする
+  const [seq, setSeq] = useState<{ ids: string[]; idx: number } | null>(null);
+  const seqIdRef = useRef<string>("");
+  const seqIdsRef = useRef<string[]>([]);
+  const seekTimerRef = useRef<number | null>(null);
+  const [seekIdx, setSeekIdx] = useState<number | null>(null);
+
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
   const onMoveRef = useRef(onMove);
@@ -140,6 +147,27 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
         .catch(() => {});
     } catch {}
   }, []);
+
+  // シークバー操作。ドラッグ中は数字だけ動かし、少し止まったら実際に移動する
+  const commitSeek = useCallback((idx: number) => {
+    const ids = seqIdsRef.current;
+    const id = ids[idx];
+    if (!id) return;
+    viewerRef.current?.moveTo(id).catch(() => {});
+  }, []);
+
+  const onSeekChange = useCallback(
+    (idx: number) => {
+      setSeekIdx(idx);
+      if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
+      seekTimerRef.current = window.setTimeout(() => {
+        seekTimerRef.current = null;
+        setSeekIdx(null);
+        commitSeek(idx);
+      }, 250);
+    },
+    [commitSeek]
+  );
 
   const clearPlayTimer = useCallback(() => {
     if (playTimerRef.current !== null) {
@@ -217,6 +245,32 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
           };
           setMovedAway(Boolean(homeIdRef.current) && img.id !== homeIdRef.current);
           if (lat || lng) onMoveRef.current?.(lat, lng, img.id);
+
+          // 走行ルートが変わったら全コマのIDを取り直し、同じなら現在位置だけ更新する
+          const sid = String(img.sequenceId ?? "");
+          if (sid && sid !== seqIdRef.current) {
+            seqIdRef.current = sid;
+            seqIdsRef.current = [];
+            setSeq(null);
+            if (MAPILLARY_TOKEN) {
+              fetch(
+                `https://graph.mapillary.com/image_ids?sequence_id=${encodeURIComponent(sid)}&access_token=${MAPILLARY_TOKEN}`
+              )
+                .then((r) => (r.ok ? r.json() : null))
+                .then((d) => {
+                  if (seqIdRef.current !== sid) return; // すでに別ルートへ移っている
+                  const ids: string[] = Array.isArray(d?.data) ? d.data.map((x: any) => String(x.id)) : [];
+                  if (ids.length < 2) return;
+                  seqIdsRef.current = ids;
+                  const at = ids.indexOf(String(currentRef.current?.id ?? ""));
+                  setSeq({ ids, idx: at >= 0 ? at : 0 });
+                })
+                .catch(() => {});
+            }
+          } else if (seqIdsRef.current.length > 0) {
+            const at = seqIdsRef.current.indexOf(String(img.id));
+            if (at >= 0) setSeq({ ids: seqIdsRef.current, idx: at });
+          }
         });
 
         try {
@@ -258,6 +312,10 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
     homeIdRef.current = imageId;
     bearingRef.current = null;
     setBearing(null);
+    seqIdRef.current = "";
+    seqIdsRef.current = [];
+    setSeq(null);
+    setSeekIdx(null);
 
     let cancelled = false;
     const timer = window.setTimeout(() => {
@@ -540,6 +598,24 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
       />
 
       {(dataLoading || seeking) && phase === "ready" && <span className="street-progress" aria-hidden="true" />}
+
+      {showControls && seq && seq.ids.length > 1 && (
+        <div className="street-seek" onClick={(e) => e.stopPropagation()}>
+          <input
+            type="range"
+            min={0}
+            max={seq.ids.length - 1}
+            step={1}
+            value={seekIdx ?? seq.idx}
+            onChange={(e) => onSeekChange(Number(e.target.value))}
+            aria-label="走行ルート内の再生位置"
+            title="この道のどこを見るかを選べます"
+          />
+          <span className="street-seek-pos">
+            {(seekIdx ?? seq.idx) + 1}/{seq.ids.length}
+          </span>
+        </div>
+      )}
 
       {phase === "fallback" && imageUrl && (
         <img className="street-fallback" src={imageUrl} alt="現在地のストリート画像" />
