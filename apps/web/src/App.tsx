@@ -675,6 +675,22 @@ export default function App() {
     if (!isRunner || state?.status !== "running") setRunnerPos(null);
   }, [isRunner, state?.status, state?.round]);
 
+  // 場所選び中は地図が主役。自分が置く番ならスマホでも地図を前面にする
+  const needsToPlace =
+    state?.status === "running" &&
+    state.phase === "setup" &&
+    ((state.mode === "duel" && !placedSelf) || (state.mode === "search" && isRunner));
+
+  useEffect(() => {
+    if (isWide) return;
+    if (needsToPlace) setFocusedPane("map");
+  }, [needsToPlace, isWide]);
+
+  useEffect(() => {
+    if (isWide) return;
+    if (state?.phase === "live") setFocusedPane("street");
+  }, [state?.phase, state?.round, isWide]);
+
   useEffect(() => {
     setPlacedSelf(false);
     setDuelPuzzle(null);
@@ -1060,6 +1076,28 @@ export default function App() {
             onClick={() => !isWide && setFocusedPane("street")}
             aria-label="ストリート画像"
           >
+            {state?.status === "running" && state.phase === "setup" && !streetCompact && (
+              <div className="setup-note" role="status">
+                <strong>
+                  {state.mode === "duel"
+                    ? placedSelf
+                      ? "相手が隠れ場所を選んでいます…"
+                      : "🎯 地図をタップして「相手に探させる場所」を選ぼう"
+                    : isRunner
+                    ? "🫥 地図をタップして隠れ場所を選ぼう"
+                    : "逃走者が隠れ場所を選んでいます…"}
+                </strong>
+                <span>
+                  {state.mode === "duel"
+                    ? placedSelf
+                      ? `（${state.placedCount ?? 1}/2）そろったら対決開始！`
+                      : "ピンを置いたら下のボタンで確定。相手には見えません"
+                    : isRunner
+                    ? "ピンを置いたら下のボタンで確定。追手には見えません"
+                    : "決まると捜索が始まります"}
+                </span>
+              </div>
+            )}
             {streetCompact ? (
               <span className="pip-label">映像 ⤢</span>
             ) : (
@@ -1224,28 +1262,6 @@ export default function App() {
             </div>
           )}
 
-          {!isMoving && !busy && state?.status === "running" && state.phase === "setup" && (
-            <div className="stage-overlay" role="status">
-              <strong>
-                {state.mode === "duel"
-                  ? placedSelf
-                    ? "相手が隠れ場所を選んでいます…"
-                    : "🎯 地図で「相手に探させる場所」を選ぼう"
-                  : isRunner
-                  ? "🫥 地図で隠れ場所を選ぼう"
-                  : "逃走者が隠れ場所を選んでいます…"}
-              </strong>
-              <span>
-                {state.mode === "duel"
-                  ? placedSelf
-                    ? `（${state.placedCount ?? 1}/2）そろったら対決開始！`
-                    : "ピンを置いて下のボタンで確定。相手には見えません"
-                  : isRunner
-                  ? "ピンを置いて下のボタンで確定。追手には見えません"
-                  : "決まると捜索が始まります"}
-              </span>
-            </div>
-          )}
 
           {result && (
             <div className={`result ${result.correct && !waitingOthers ? "is-correct" : "is-miss"}`} role="status">

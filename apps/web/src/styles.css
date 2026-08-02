@@ -349,6 +349,34 @@ code {
 .tool-btn.is-on { background: var(--brand); border-color: var(--brand); color: #fff; }
 .tool-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+/* 場所選び中の案内。映像ペイン上部に出すだけで、操作は一切ブロックしない */
+.setup-note {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 900;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  max-width: min(92%, 460px);
+  padding: 10px 16px;
+  border-radius: 12px;
+  background: rgb(7 12 11 / 88%);
+  border: 1px solid var(--line);
+  text-align: center;
+}
+
+.setup-note strong { font-size: 13px; color: var(--text); line-height: 1.35; }
+.setup-note span { font-size: 11px; color: var(--muted); line-height: 1.4; }
+
+@media (max-width: 899px) {
+  .setup-note { top: 8px; padding: 8px 12px; }
+  .setup-note strong { font-size: 12px; }
+}
+
 /* Search & Chase: 逃走者の下見地点(移動の候補)。確定位置と区別する中抜き */
 .scout-icon { pointer-events: none; }
 
