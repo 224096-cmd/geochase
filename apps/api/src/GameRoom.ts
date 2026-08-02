@@ -35,6 +35,8 @@ const MAX_TIME_LIMIT_SECONDS = 2700;
 const SETUP_TIMEOUT_MS = 60_000;
 // Search & Chase: 逃走者が1回の移動で進める上限(シークバーでの大ワープ防止)
 const MOVE_CAP_KM = 2.5;
+// Search & Chase: 行き止まり脱出用「地図ジャンプ」の1ラウンド上限
+const SEARCH_JUMPS_PER_ROUND = 2;
 // 対決: この距離以内で当てたら即勝利
 const DUEL_FIND_KM = 0.5;
 const DUEL_FIND_BONUS = 1500;
@@ -79,6 +81,8 @@ interface RoomState {
   duel: Record<string, { spot: StreetSpot }> | null;
   /** 対決: 開始時に確定した参加者2名(途中参加の割り込み防止) */
   duelPlayers: string[] | null;
+  /** Search & Chase: 行き止まり脱出用の地図ジャンプ残り回数 */
+  searchJumpsLeft: number;
   trail: LatLng[];
   revealedTrail: TrailPoint[];
   imageUrl: string;
@@ -118,6 +122,7 @@ const DEFAULT_STATE: RoomState = {
   phase: null,
   duel: null,
   duelPlayers: null,
+  searchJumpsLeft: 0,
   trail: [],
   revealedTrail: [],
   imageUrl: "",
@@ -479,6 +484,12 @@ export class GameRoom extends DurableObject<Env> {
         break;
       }
 
+      case "jump": {
+        const id = attachment?.playerId ?? msg.userId ?? "";
+        await this.handleJump(ws, id, msg.lat, msg.lng);
+        break;
+      }
+
       case "next":
         if (this.denyIfNotHost(ws, "次のラウンドへ進む")) return;
         await this.startNextClassicRound();
@@ -649,6 +660,16 @@ export class GameRoom extends DurableObject<Env> {
     const distanceKm = haversineKm(guess, target);
     this.ensurePlayer(userId, playerName);
     s.attempts += 1;
+
+    // 相手への接近警告(5kmラインを初めて跨いだときだけ)
+    const prevForWarn = s.classicAnswers[userId];
+    if (distanceKm <= 5 && (!prevForWarn || prevForWarn.distanceKm > 5)) {
+      for (const wsx of this.ctx.getWebSockets()) {
+        if (this.attachmentOf(wsx)?.playerId === oppId) {
+          this.tell(wsx, "⚠ 相手があなたの隠れ場所の5km以内に接近している！");
+        }
+      }
+    }
 
     // 自己ベストを更新(時間切れ時の勝敗判定に使う)
     const prev = s.classicAnswers[userId];
@@ -943,10 +964,11 @@ export class GameRoom extends DurableObject<Env> {
     await this.ctx.storage.deleteAlarm();
     if (s.roundEndsAt > 0) await this.ctx.storage.setAlarm(s.roundEndsAt);
 
-    this.sendDuelPuzzles();
     this.notice("⚔ 対決開始！ 何度でも回答できる。先に0.5km以内を当てた方の勝ち！");
     await this.persist();
     this.broadcast(this.publicState());
+    // 状態(phase=live)を配ってから各自の「相手の地点」を届ける
+    this.sendDuelPuzzles();
   }
 
   /** duel: 各プレイヤーに「相手の地点」の映像を配る */
@@ -1000,13 +1022,15 @@ export class GameRoom extends DurableObject<Env> {
       return;
     }
 
-    this.announceMoving(true);
+    // 対決では片方の確定処理中に全員へ「移動中」を出さない(確定者本人にはボタン側で示す)
+    const quiet = s.mode === "duel";
+    if (!quiet) this.announceMoving(true);
     const spot = await nearestImage(this.env.MAPILLARY_TOKEN, { lat, lng }, { panoOnly: false, carOnly: true });
 
     if (!spot) {
       this.gameState.moving = false;
       this.tell(ws, "その付近に車載の撮影がありません。地図の「🟢 360°の道」「⚪ 平面のみの道」で線を表示し、その近くを選んでください");
-      this.broadcast(this.publicState());
+      if (!quiet) this.broadcast(this.publicState());
       return;
     }
 
@@ -1087,6 +1111,58 @@ export class GameRoom extends DurableObject<Env> {
     this.gameState.nextUpdateAt = now + this.gameState.intervalMs;
 
     this.notice("👣 逃走者が移動した！");
+    await this.persist();
+    this.broadcast(this.publicState());
+    this.pushRunnerPosition();
+  }
+
+  /**
+   * Search & Chase: 行き止まり脱出の地図ジャンプ。
+   * 映像内移動と同じ間隔・同じ距離上限を守りつつ、地図で指した近くの道へ跳ぶ。
+   * 強力なぶん回数制(1ラウンド2回)。
+   */
+  private async handleJump(ws: WebSocket, userId: string, lat: number, lng: number) {
+    const s = this.gameState;
+    if (s.mode !== "search" || s.status !== "running" || s.phase !== "live" || s.moving) return;
+    if (!userId || userId !== s.runnerId) return;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    if (!s.runnerPosition) return;
+
+    if (s.searchJumpsLeft <= 0) {
+      this.tell(ws, "地図ジャンプは使い切りました（映像内の移動は引き続き可能）");
+      return;
+    }
+    const now = Date.now();
+    if (now < s.nextUpdateAt - 750) {
+      const wait = Math.ceil((s.nextUpdateAt - now) / 1000);
+      this.tell(ws, `まだ移動できません（あと${wait}秒）`);
+      return;
+    }
+    const hopKm = haversineKm(s.runnerPosition, { lat, lng });
+    if (hopKm > MOVE_CAP_KM) {
+      this.tell(ws, `一度に移動できるのは${MOVE_CAP_KM}kmまでです（今は${hopKm.toFixed(1)}km先）`);
+      return;
+    }
+
+    this.announceMoving(true);
+    const spot = await nearestImage(this.env.MAPILLARY_TOKEN, { lat, lng }, { panoOnly: false, carOnly: true });
+
+    if (!spot) {
+      this.gameState.moving = false;
+      this.tell(ws, "その付近に車載の撮影がありません。少しずらして指定してください");
+      this.broadcast(this.publicState());
+      return;
+    }
+
+    this.gameState.runnerPosition = spot.point;
+    this.gameState.trail = [...this.gameState.trail, spot.point].slice(-TRAIL_LENGTH);
+    this.applySpot(spot, spot.point);
+    this.gameState.searchJumpsLeft -= 1;
+    this.gameState.moving = false;
+    this.gameState.lastMoveAt = now;
+    this.gameState.nextUpdateAt = now + this.gameState.intervalMs;
+
+    this.notice(`👣 逃走者が別の道へ跳んだ！（地図ジャンプ 残り${this.gameState.searchJumpsLeft}回）`);
     await this.persist();
     this.broadcast(this.publicState());
     this.pushRunnerPosition();
@@ -1175,6 +1251,7 @@ export class GameRoom extends DurableObject<Env> {
       nextUpdateAt: 0,
       roundEndsAt: !needsSetup && this.gameState.timeLimitSeconds > 0 ? now + this.gameState.timeLimitSeconds * 1000 : 0,
       relocationsLeft: 0,
+      searchJumpsLeft: this.gameState.mode === "search" ? SEARCH_JUMPS_PER_ROUND : 0,
       phase: needsSetup ? "setup" : null,
       duel: this.gameState.mode === "duel" ? {} : null,
       moving: false,
@@ -1481,6 +1558,7 @@ export class GameRoom extends DurableObject<Env> {
       runnerId: s.mode === "search" ? s.runnerId : null,
       runnerName: s.mode === "search" && s.runnerId ? this.playerLabel(s.runnerId) : null,
       relocationsLeft: s.mode === "search" ? s.relocationsLeft : 0,
+      searchJumpsLeft: s.mode === "search" ? s.searchJumpsLeft : 0,
       moving: s.moving,
       lastMoveAt: s.lastMoveAt,
       revealedTrail: s.revealedTrail,

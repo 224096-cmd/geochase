@@ -208,6 +208,8 @@ export default function App() {
   const [runnerPos, setRunnerPos] = useState<LatLng | null>(null);
   // search/duel: 自分の場所決めが受理済みか
   const [placedSelf, setPlacedSelf] = useState(false);
+  // duel: 場所確定リクエストの処理中(サーバのmoving配信を使わないローカル表示)
+  const [placing, setPlacing] = useState(false);
   // duel: 自分が探す「相手の地点」の映像
   const [duelPuzzle, setDuelPuzzle] = useState<{
     imageId: string;
@@ -266,7 +268,10 @@ export default function App() {
     onCaught: handleCaught,
     onNotice: showToast,
     onRunnerPos: setRunnerPos,
-    onPlaced: () => setPlacedSelf(true),
+    onPlaced: () => {
+      setPlacedSelf(true);
+      setPlacing(false);
+    },
     onDuelPuzzle: setDuelPuzzle,
   });
 
@@ -675,6 +680,13 @@ export default function App() {
     if (!isRunner || state?.status !== "running") setRunnerPos(null);
   }, [isRunner, state?.status, state?.round]);
 
+  // 対決: live なのに問題映像が未着なら sync で取り直す(取りこぼしの自己修復)
+  useEffect(() => {
+    if (state?.mode !== "duel" || state.phase !== "live" || duelPuzzle) return;
+    const t = window.setTimeout(() => send({ type: "sync" }), 1200);
+    return () => window.clearTimeout(t);
+  }, [state?.mode, state?.phase, state?.round, duelPuzzle, send]);
+
   // 場所選び中は地図が主役。自分が置く番ならスマホでも地図を前面にする
   const needsToPlace =
     state?.status === "running" &&
@@ -692,7 +704,14 @@ export default function App() {
   }, [state?.phase, state?.round, isWide]);
 
   useEffect(() => {
+    if (!placing) return;
+    const t = window.setTimeout(() => setPlacing(false), 8000);
+    return () => window.clearTimeout(t);
+  }, [placing]);
+
+  useEffect(() => {
     setPlacedSelf(false);
+    setPlacing(false);
     setDuelPuzzle(null);
     setScoutPos(null);
     scoutRef.current = null;
@@ -735,11 +754,12 @@ export default function App() {
               showToast("地図をタップして、相手に探させる場所を選んでください");
               return;
             }
-            if (!send({ type: "place", lat: guessPin.lat, lng: guessPin.lng })) showToast("接続が切れています");
+            if (send({ type: "place", lat: guessPin.lat, lng: guessPin.lng })) setPlacing(true);
+            else showToast("接続が切れています");
           },
-          disabled: isMoving,
+          disabled: placing,
           title: "相手はこの場所のストリートビューだけを頼りに探します",
-          label: isMoving ? "確認中…" : guessPin ? "🎯 この場所を相手の問題にする" : "地図をタップして隠れ場所を選ぶ",
+          label: placing ? "確認中…" : guessPin ? "🎯 この場所を相手の問題にする" : "地図をタップして隠れ場所を選ぶ",
         };
       }
       return {
@@ -768,15 +788,22 @@ export default function App() {
       return { onClick: () => {}, disabled: true, label: "逃走者が隠れる場所を選んでいます…" };
     }
 
-    // Search & Chase: 逃走者は映像で下見し、間隔ごとに「いま見ている場所」へ移動
+    // Search & Chase: 逃走者。映像下見→間隔ごとに移動。地図ピンで「別の道へジャンプ」も可
     if (isRunner && phase === "live") {
       const remainMs = Math.max(0, (state?.nextUpdateAt ?? 0) - serverNow());
       const ready = remainMs <= 0;
+      const jumps = state?.searchJumpsLeft ?? 0;
+      const jumpMode = Boolean(guessPin) && jumps > 0;
       return {
         onClick: () => {
+          if (jumpMode && guessPin) {
+            if (send({ type: "jump", lat: guessPin.lat, lng: guessPin.lng })) setGuessPin(null);
+            else showToast("接続が切れています");
+            return;
+          }
           const sc = scoutRef.current;
           if (!sc) {
-            showToast("映像を動かして(再生・コマ送り・シーク)移動先を決めてください");
+            showToast("映像を動かすか、地図をタップしてジャンプ先を選んでください");
             return;
           }
           if (!send({ type: "relocate", lat: sc.lat, lng: sc.lng, imageId: sc.imageId })) {
@@ -784,14 +811,18 @@ export default function App() {
           }
         },
         disabled: !isRunning || isMoving || !ready,
-        title: "いま映像で見ている場所へ実際に移動します（1回2.5kmまで）",
+        title: jumpMode
+          ? "行き止まり脱出用。地図で指した近くの道へ跳びます（2.5km以内・回数制）"
+          : "いま映像で見ている場所へ実際に移動します（1回2.5kmまで）",
         label: isMoving
           ? "移動中…"
           : !ready
-          ? `⏳ 次の移動まで ${formatClock(remainMs / 1000)}（映像で下見）`
+          ? `⏳ 次の移動まで ${formatClock(remainMs / 1000)}（下見/ジャンプ先指定OK）`
+          : jumpMode
+          ? `🗺 ピンの道へジャンプ（残り${jumps}回）`
           : scoutPos
           ? "📍 この映像の場所へ移動する"
-          : "映像を動かして移動先を決める",
+          : "映像を動かすか地図でジャンプ先を選ぶ",
       };
     }
     return {
@@ -830,6 +861,8 @@ export default function App() {
     state?.phase,
     state?.placedCount,
     state?.nextUpdateAt,
+    state?.searchJumpsLeft,
+    placing,
     placedSelf,
     scoutPos,
     serverNow,
@@ -1174,7 +1207,12 @@ export default function App() {
             <MapView
               onPick={(lat, lng) => {
                 if (isRunner && state?.phase === "live") {
-                  showToast("あなたは逃走者。映像を動かして「移動」で逃げましょう");
+                  if ((state.searchJumpsLeft ?? 0) <= 0) {
+                    showToast("地図ジャンプは使い切りました。映像内の移動で逃げましょう");
+                    return;
+                  }
+                  setGuessPin({ lat, lng });
+                  setExplorePin(null);
                   return;
                 }
                 setGuessPin({ lat, lng });
@@ -1433,7 +1471,7 @@ export default function App() {
                   <strong>Search &amp; Chase</strong>（2人以上）: 逃走者がまず地図で隠れ場所を選び、
                   以後はストリートビューの中を自由に下見しながら、設定した間隔ごとに
                   「いま見ている場所」へ実際に移動できます（1回2.5kmまで）。追手は映像から現在地を特定。
-                  隠れ場所は360°が優先されますが、車から撮影した平面写真の道も選べます。
+                  隠れ場所は360°が優先されますが、車から撮影した平面写真の道も選べます。行き止まりに入っても、地図をタップして近くの道へ「ジャンプ」できます（1ラウンド2回まで）。
                   逃走者の得点は「追手の平均点が低いほど」高くなります。ヒントは使えません。
                 </p>
                 <p className="note">

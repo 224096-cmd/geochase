@@ -67,6 +67,7 @@ export interface RoomState {
   runnerId?: string | null;
   runnerName?: string | null;
   relocationsLeft?: number;
+  searchJumpsLeft?: number;
   moving?: boolean;
   lastMoveAt?: number;
   revealedTrail: TrailPoint[];

@@ -105,6 +105,8 @@ export interface PublicState {
   runnerName: string | null;
   /** Search & Chase: 逃走者の残り移動回数 */
   relocationsLeft: number;
+  /** Search & Chase: 行き止まり脱出用の地図ジャンプ残り回数 */
+  searchJumpsLeft: number;
   moving: boolean;
   lastMoveAt: number;
   revealedTrail: TrailPoint[];
@@ -117,6 +119,7 @@ export type ClientMessage =
   | { type: "next" }
   | { type: "place"; lat: number; lng: number; userId?: string }
   | { type: "relocate"; lat: number; lng: number; imageId: string; userId?: string }
+  | { type: "jump"; lat: number; lng: number; userId?: string }
   | { type: "rename"; playerName: string }
   | { type: "sync" };
 
