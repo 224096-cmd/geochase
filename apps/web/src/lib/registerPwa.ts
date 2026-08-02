@@ -10,6 +10,12 @@ export function registerPwa() {
 
   const updateSW = registerSW({
     immediate: true,
+    // 新版検出時は待たずに切り替える(連続デプロイ時の新旧混在を防ぐ)。
+    // 進行中のゲームを壊さないよう、実リロードは onNeedRefresh 側で行う
+    onRegisteredSW(_url, registration) {
+      // タブを開きっぱなしでも1分ごとに新版を確認する
+      if (registration) window.setInterval(() => registration.update().catch(() => {}), 60_000);
+    },
     onNeedRefresh() {
       const bar = document.createElement("div");
       bar.className = "toast";
@@ -25,6 +31,9 @@ export function registerPwa() {
 
       bar.appendChild(button);
       document.body.appendChild(bar);
+
+      // 15秒後にまだ操作がなければ自動適用(古い版で遊び続ける事故の防止)
+      window.setTimeout(() => updateSW(true), 15_000);
     },
   });
 }
