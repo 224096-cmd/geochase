@@ -1,4 +1,4 @@
-export type Mode = "classic" | "chase" | "search";
+export type Mode = "classic" | "chase" | "search" | "duel";
 export type GameStatus = "idle" | "running" | "reveal" | "finished";
 export type Proximity = "burning" | "hot" | "warm" | "cold" | "freezing";
 
@@ -57,6 +57,10 @@ export interface RoomState {
   hostId?: string | null;
   answered?: number;
   scoreboard?: PlayerScore[];
+  /** search/duel の進行段階。setup=場所選び中 */
+  phase?: "setup" | "live" | null;
+  /** duel: 場所を決め終えた人数 */
+  placedCount?: number;
   /** 接続中のプレイヤー一覧(逃走者の指名UI用) */
   roster?: { id: string; name: string | null }[];
   /** Search & Chase: 逃走役プレイヤー(他モードではnull) */

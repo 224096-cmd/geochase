@@ -206,6 +206,18 @@ export default function App() {
   const [seekDraft, setSeekDraft] = useState<number | null>(null);
   // Search & Chase: 逃走者本人にだけサーバから届く現在地
   const [runnerPos, setRunnerPos] = useState<LatLng | null>(null);
+  // search/duel: 自分の場所決めが受理済みか
+  const [placedSelf, setPlacedSelf] = useState(false);
+  // duel: 自分が探す「相手の地点」の映像
+  const [duelPuzzle, setDuelPuzzle] = useState<{
+    imageId: string;
+    imageUrl: string;
+    isPano: boolean;
+    compassAngle: number | null;
+  } | null>(null);
+  // search: 逃走者が映像で下見している現在地(移動の候補)
+  const scoutRef = useRef<{ lat: number; lng: number; imageId: string } | null>(null);
+  const [scoutPos, setScoutPos] = useState<LatLng | null>(null);
   const seekTimerRef = useRef<number | null>(null);
   const onSeekInput = useCallback((idx: number) => {
     setSeekDraft(idx);
@@ -254,6 +266,8 @@ export default function App() {
     onCaught: handleCaught,
     onNotice: showToast,
     onRunnerPos: setRunnerPos,
+    onPlaced: () => setPlacedSelf(true),
+    onDuelPuzzle: setDuelPuzzle,
   });
 
   const isHost = !state?.hostId || state.hostId === playerId;
@@ -403,6 +417,10 @@ export default function App() {
         showToast("Search & Chase は2人以上で遊べます（招待リンクを共有してください）");
         return;
       }
+      if (settings.mode === "duel" && (state?.players ?? 1) !== 2) {
+        showToast("対決モードはちょうど2人で遊びます");
+        return;
+      }
       const { runnerChoice, ...opts } = settings;
       if (settings.mode === "search" && runnerChoice !== "random") {
         opts.runnerId = runnerChoice;
@@ -470,7 +488,19 @@ export default function App() {
   // 下見中は「いま見ている場所」がそのまま回答候補なので、映像が動いたらピンも動かす。
   // 現地（答えの映像）を見ているときは答えが漏れるので何もしない
   const handleStreetMove = useCallback(
-    (lat: number, lng: number) => {
+    (lat: number, lng: number, imageId?: string) => {
+      // Search & Chase の逃走者: 本編映像の移動＝移動先の下見
+      if (
+        streetSource === "live" &&
+        state?.mode === "search" &&
+        state.phase === "live" &&
+        state.runnerId === playerId &&
+        imageId
+      ) {
+        scoutRef.current = { lat, lng, imageId };
+        setScoutPos({ lat, lng });
+        return;
+      }
       if (streetSource !== "explore") return;
       const next = { lat, lng };
       setExplorePin(next);
@@ -478,14 +508,14 @@ export default function App() {
         setGuessPin(next);
       }
     },
-    [result?.waiting, state?.moving, state?.status, streetSource]
+    [result?.waiting, state?.moving, state?.status, state?.mode, state?.phase, state?.runnerId, playerId, streetSource]
   );
 
   const shareResult = useCallback(async () => {
     if (!state) return;
     const me = state.scoreboard?.find((p) => p.id === playerId);
     const rank = state.scoreboard?.findIndex((p) => p.id === playerId) ?? -1;
-    const modeLabel = state.mode === "chase" ? "逃走モード" : state.mode === "search" ? "Search & Chase" : "通常モード";
+    const modeLabel = state.mode === "chase" ? "逃走モード" : state.mode === "search" ? "Search & Chase" : state.mode === "duel" ? "対決モード" : "通常モード";
     const rankText = rank >= 0 && (state.scoreboard?.length ?? 0) > 1
       ? `（${state.scoreboard!.length}人中 ${rank + 1}位）`
       : "";
@@ -620,20 +650,23 @@ export default function App() {
   const countdown = useMemo(() => {
     void tick;
     if (!state || state.status !== "running") return null;
-    const deadline = state.nextUpdateAt || state.roundEndsAt;
+    const useInterval = state.mode === "chase" && Boolean(state.nextUpdateAt);
+    const deadline = useInterval ? state.nextUpdateAt : state.roundEndsAt;
     if (!deadline) return null;
-    const total = state.nextUpdateAt ? state.intervalSeconds * 1000 : state.timeLimitSeconds * 1000;
+    const total = useInterval ? state.intervalSeconds * 1000 : state.timeLimitSeconds * 1000;
     const remainingMs = Math.max(0, deadline - serverNow());
     return {
       seconds: remainingMs / 1000,
       ratio: total > 0 ? Math.max(0, Math.min(1, remainingMs / total)) : 0,
-      label: state.nextUpdateAt ? "次の移動まで" : "残り時間",
+      label: useInterval ? "次の移動まで" : "残り時間",
     };
   }, [state, serverNow, tick]);
 
   const displayed =
     streetSource === "explore" && explore
       ? explore
+      : state?.mode === "duel" && duelPuzzle
+      ? duelPuzzle
       : { imageId: state?.imageId ?? "", imageUrl: state?.imageUrl ?? "" };
 
   const isRunner = state?.mode === "search" && Boolean(state.runnerId) && state.runnerId === playerId;
@@ -641,6 +674,13 @@ export default function App() {
   useEffect(() => {
     if (!isRunner || state?.status !== "running") setRunnerPos(null);
   }, [isRunner, state?.status, state?.round]);
+
+  useEffect(() => {
+    setPlacedSelf(false);
+    setDuelPuzzle(null);
+    setScoutPos(null);
+    scoutRef.current = null;
+  }, [state?.round, state?.mode, state?.status === "idle"]);
 
   const urgency = countdown ? (countdown.ratio < 0.15 ? "critical" : countdown.ratio < 0.4 ? "warn" : "calm") : "calm";
 
@@ -668,21 +708,74 @@ export default function App() {
           : `あなた ${formatScore(myRank?.total ?? 0)}点（ホスト待ち）`,
       };
     }
-    if (isRunner) {
-      const left = state?.relocationsLeft ?? 0;
+    const phase = state?.phase ?? null;
+
+    // 対決: まず両者が隠れ場所を選ぶ
+    if (state?.mode === "duel" && phase === "setup") {
+      if (!placedSelf) {
+        return {
+          onClick: () => {
+            if (!guessPin) {
+              showToast("地図をタップして、相手に探させる場所を選んでください");
+              return;
+            }
+            if (!send({ type: "place", lat: guessPin.lat, lng: guessPin.lng })) showToast("接続が切れています");
+          },
+          disabled: isMoving,
+          title: "相手はこの場所のストリートビューだけを頼りに探します",
+          label: isMoving ? "確認中…" : guessPin ? "🎯 この場所を相手の問題にする" : "地図をタップして隠れ場所を選ぶ",
+        };
+      }
+      return {
+        onClick: () => {},
+        disabled: true,
+        label: `相手が隠れ場所を選んでいます…（${state.placedCount ?? 1}/2）`,
+      };
+    }
+
+    // Search & Chase: 場所選び
+    if (state?.mode === "search" && phase === "setup") {
+      if (isRunner) {
+        return {
+          onClick: () => {
+            if (!guessPin) {
+              showToast("地図をタップして、隠れ場所を選んでください");
+              return;
+            }
+            if (!send({ type: "place", lat: guessPin.lat, lng: guessPin.lng })) showToast("接続が切れています");
+          },
+          disabled: isMoving,
+          title: "この付近の車載360°地点があなたの潜伏場所になります",
+          label: isMoving ? "確認中…" : guessPin ? "🫥 この場所に隠れる" : "地図をタップして隠れ場所を選ぶ",
+        };
+      }
+      return { onClick: () => {}, disabled: true, label: "逃走者が隠れる場所を選んでいます…" };
+    }
+
+    // Search & Chase: 逃走者は映像で下見し、間隔ごとに「いま見ている場所」へ移動
+    if (isRunner && phase === "live") {
+      const remainMs = Math.max(0, (state?.nextUpdateAt ?? 0) - serverNow());
+      const ready = remainMs <= 0;
       return {
         onClick: () => {
-          if (!send({ type: "relocate" })) showToast("接続が切れています");
+          const sc = scoutRef.current;
+          if (!sc) {
+            showToast("映像を動かして(再生・コマ送り・シーク)移動先を決めてください");
+            return;
+          }
+          if (!send({ type: "relocate", lat: sc.lat, lng: sc.lng, imageId: sc.imageId })) {
+            showToast("接続が切れています");
+          }
         },
-        disabled: !isRunning || isMoving || left <= 0,
-        title: "追手の回答から離れた別の地点へ逃げます",
+        disabled: !isRunning || isMoving || !ready,
+        title: "いま映像で見ている場所へ実際に移動します（1回2.5kmまで）",
         label: isMoving
-          ? "逃走中…"
-          : !isRunning
-          ? "スタート待ち"
-          : left > 0
-          ? `🏃 逃げる！ 別の場所へ（残り${left}回）`
-          : "移動は使い切った…追手を待つ",
+          ? "移動中…"
+          : !ready
+          ? `⏳ 次の移動まで ${formatClock(remainMs / 1000)}（映像で下見）`
+          : scoutPos
+          ? "📍 この映像の場所へ移動する"
+          : "映像を動かして移動先を決める",
       };
     }
     return {
@@ -717,7 +810,14 @@ export default function App() {
     handleStart,
     submitGuess,
     isRunner,
-    state?.relocationsLeft,
+    state?.mode,
+    state?.phase,
+    state?.placedCount,
+    state?.nextUpdateAt,
+    placedSelf,
+    scoutPos,
+    serverNow,
+    tick,
     send,
     showToast,
   ]);
@@ -992,8 +1092,8 @@ export default function App() {
               ref={streetRef}
               imageId={displayed.imageId}
               imageUrl={displayed.imageUrl}
-              compassAngle={state?.compassAngle ?? null}
-              imageMissing={Boolean(state?.imageMissing) && streetSource === "live"}
+              compassAngle={(state?.mode === "duel" && duelPuzzle ? duelPuzzle.compassAngle : state?.compassAngle) ?? null}
+              imageMissing={Boolean(state?.imageMissing) && streetSource === "live" && state?.phase !== "setup"}
               playLength={playLength}
               playSpeed={playSpeed}
               compact={streetCompact}
@@ -1035,8 +1135,8 @@ export default function App() {
             {mapCompact && <span className="pip-label">地図 ⤢</span>}
             <MapView
               onPick={(lat, lng) => {
-                if (isRunner) {
-                  showToast("あなたは逃走者。回答はできません（「逃げる！」で移動）");
+                if (isRunner && state?.phase === "live") {
+                  showToast("あなたは逃走者。映像を動かして「移動」で逃げましょう");
                   return;
                 }
                 setGuessPin({ lat, lng });
@@ -1050,7 +1150,8 @@ export default function App() {
               onExplore={guessPin && isRunning && !isMoving ? exploreHere : undefined}
               exploreLoading={exploreLoading}
               runnerPos={isRunner ? runnerPos : null}
-              panTo={isRunner ? runnerPos : streetSource === "explore" ? explorePin : null}
+              scoutPos={isRunner && state?.phase === "live" ? scoutPos : null}
+              panTo={isRunner ? scoutPos ?? runnerPos : streetSource === "explore" ? explorePin : null}
             />
           </section>
 
@@ -1123,6 +1224,29 @@ export default function App() {
             </div>
           )}
 
+          {!isMoving && !busy && state?.status === "running" && state.phase === "setup" && (
+            <div className="stage-overlay" role="status">
+              <strong>
+                {state.mode === "duel"
+                  ? placedSelf
+                    ? "相手が隠れ場所を選んでいます…"
+                    : "🎯 地図で「相手に探させる場所」を選ぼう"
+                  : isRunner
+                  ? "🫥 地図で隠れ場所を選ぼう"
+                  : "逃走者が隠れ場所を選んでいます…"}
+              </strong>
+              <span>
+                {state.mode === "duel"
+                  ? placedSelf
+                    ? `（${state.placedCount ?? 1}/2）そろったら対決開始！`
+                    : "ピンを置いて下のボタンで確定。相手には見えません"
+                  : isRunner
+                  ? "ピンを置いて下のボタンで確定。追手には見えません"
+                  : "決まると捜索が始まります"}
+              </span>
+            </div>
+          )}
+
           {result && (
             <div className={`result ${result.correct && !waitingOthers ? "is-correct" : "is-miss"}`} role="status">
               <strong>
@@ -1177,8 +1301,13 @@ export default function App() {
                     <option value="chase">逃走モード（AIが逃げる）</option>
                     <option value="classic">通常モード</option>
                     <option value="search">Search &amp; Chase（1人が逃げる対戦）</option>
+                    <option value="duel">対決（2人・場所を出し合う）</option>
                   </select>
                 </label>
+
+                {settings.mode === "duel" && (state?.players ?? 1) !== 2 && (
+                  <p className="field-warn">⚠ 対決モードはちょうど2人で遊びます（今は{state?.players ?? 1}人）</p>
+                )}
 
                 {settings.mode === "search" && (
                   <label className="field">
@@ -1229,9 +1358,9 @@ export default function App() {
                   </p>
                 )}
 
-                {settings.mode === "chase" ? (
+                {(settings.mode === "chase" || settings.mode === "search") && (
                   <label className="field">
-                    <span>逃走者が移動する間隔</span>
+                    <span>{settings.mode === "search" ? "逃走者が移動できる間隔" : "逃走者が移動する間隔"}</span>
                     <select
                       value={settings.intervalSeconds}
                       onChange={(e) => setSettings((s) => ({ ...s, intervalSeconds: Number(e.target.value) }))}
@@ -1244,7 +1373,9 @@ export default function App() {
                       ))}
                     </select>
                   </label>
-                ) : (
+                )}
+
+                {settings.mode !== "chase" && (
                   <>
                     <label className="field">
                       <span>1ラウンドの制限時間</span>
@@ -1282,9 +1413,15 @@ export default function App() {
                   最後に累計スコアの順位が出ます。
                 </p>
                 <p className="note">
-                  <strong>Search &amp; Chase</strong>（2人以上）: 1人がランダムで逃走者になり、車載360°の地点を
-                  ラウンド中に最大2回まで移動できます。追手は今いる場所を当てて得点、
-                  逃走者は「追手の平均点が低いほど」高得点。ヒントはこのモードでは使えません。
+                  <strong>Search &amp; Chase</strong>（2人以上）: 逃走者がまず地図で隠れ場所を選び、
+                  以後はストリートビューの中を自由に下見しながら、設定した間隔ごとに
+                  「いま見ている場所」へ実際に移動できます（1回2.5kmまで）。追手は映像から現在地を特定。
+                  逃走者の得点は「追手の平均点が低いほど」高くなります。ヒントは使えません。
+                </p>
+                <p className="note">
+                  <strong>対決</strong>（2人専用）: お互いに地図で隠れ場所を出し合い、相手が選んだ場所の
+                  ストリートビューだけを頼りに探します。0.5km以内で当てたら即勝利(+1500)、
+                  そうでなければ近かった方の勝ち(+800)。
                 </p>
                 <p className="note">設定を変えたら上の「スタート」でやり直します。</p>
 

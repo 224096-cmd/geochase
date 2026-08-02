@@ -1213,6 +1213,20 @@ export interface NearestOptions {
   minKm?: number;
 }
 
+/**
+ * 指定した画像IDを、出題と同じ基準(360°パノラマ+車載+線路照合)で検証してスポット化する。
+ * Search & Chase で逃走者が「いま見ている映像の場所」へ移動するときに使う。
+ */
+export async function fetchSpotForImage(token: string, imageId: string): Promise<StreetSpot | null> {
+  if (!token || !imageId) return null;
+  const budget = new SearchBudget(5);
+  const details = await fetchDetails(token, [imageId], budget);
+  const img = details.get(imageId);
+  if (!img || img.is_pano !== true || img.on_foot === true) return null;
+  if (!(await verifyCarSequence(token, img.sequence, budget))) return null;
+  return toSpot(img, { transport: "car" });
+}
+
 export async function nearestImage(
   token: string,
   point: LatLng,

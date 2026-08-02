@@ -35,6 +35,10 @@ interface Options {
   onNotice: (message: string) => void;
   /** Search & Chase: 逃走者本人にだけ届く現在地 */
   onRunnerPos?: (position: { lat: number; lng: number }) => void;
+  /** search/duel: 自分の場所決めが受理された */
+  onPlaced?: () => void;
+  /** duel: 自分が探すべき「相手の地点」の映像 */
+  onDuelPuzzle?: (puzzle: { imageId: string; imageUrl: string; isPano: boolean; compassAngle: number | null }) => void;
 }
 
 /**
@@ -44,7 +48,7 @@ interface Options {
  *  - サーバー時刻との差分を保持し、カウントダウンをローカル時計のズレなしで計算する
  *  - 接続時に playerId を渡し、サーバー側でホスト判定と個別の連打防止に使う
  */
-export function useGameRoom({ roomId, playerName, onResult, onCaught, onNotice, onRunnerPos }: Options) {
+export function useGameRoom({ roomId, playerName, onResult, onCaught, onNotice, onRunnerPos, onPlaced, onDuelPuzzle }: Options) {
   const [state, setState] = useState<RoomState | null>(null);
   const [connection, setConnection] = useState<ConnectionStatus>("connecting");
   const [playerId] = useState(resolvePlayerId);
@@ -56,8 +60,8 @@ export function useGameRoom({ roomId, playerName, onResult, onCaught, onNotice, 
   const heartbeat = useRef<number | null>(null);
   const closedByUs = useRef(false);
 
-  const handlers = useRef({ onResult, onCaught, onNotice, onRunnerPos });
-  handlers.current = { onResult, onCaught, onNotice, onRunnerPos };
+  const handlers = useRef({ onResult, onCaught, onNotice, onRunnerPos, onPlaced, onDuelPuzzle });
+  handlers.current = { onResult, onCaught, onNotice, onRunnerPos, onPlaced, onDuelPuzzle };
 
   // 名前は接続を張り直さずに反映したいので、refで最新値を持つ
   const nameRef = useRef(playerName);

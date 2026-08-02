@@ -16,6 +16,14 @@ function makePinIcon(color: string) {
 
 const guessPinIcon = makePinIcon("#E0483E");
 
+// Search & Chase: 逃走者の「移動先候補」(映像で下見している場所)
+const scoutIcon = L.divIcon({
+  className: "scout-icon",
+  html: '<span class="scout-dot"></span><span class="scout-label">移動先候補</span>',
+  iconSize: [14, 14],
+  iconAnchor: [7, 7],
+});
+
 // Search & Chase: 逃走者本人にだけ見える「あなたの現在地」
 const runnerSelfIcon = L.divIcon({
   className: "runner-self-icon",
@@ -148,6 +156,8 @@ interface Props {
   markerPosition?: LatLng | null;
   /** Search & Chase: 逃走者本人の現在地(本人以外はnull) */
   runnerPos?: LatLng | null;
+  /** Search & Chase: 逃走者が映像で下見中の地点 */
+  scoutPos?: LatLng | null;
   targetPosition?: LatLng | null;
   trail?: TrailPoint[];
   locked?: boolean;
@@ -161,6 +171,7 @@ export default function MapView({
   onPick,
   markerPosition,
   runnerPos,
+  scoutPos,
   targetPosition,
   trail = [],
   locked = false,
@@ -384,6 +395,21 @@ export default function MapView({
     if (runnerMarker.current) runnerMarker.current.setLatLng(latlng);
     else runnerMarker.current = L.marker(latlng, { icon: runnerSelfIcon, keyboard: false, interactive: false }).addTo(map);
   }, [runnerPos]);
+
+  // 下見中の地点(中抜きの青)。確定位置と区別する
+  const scoutMarker = useRef<L.Marker | null>(null);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (!scoutPos) {
+      scoutMarker.current?.remove();
+      scoutMarker.current = null;
+      return;
+    }
+    const latlng = L.latLng(scoutPos.lat, scoutPos.lng);
+    if (scoutMarker.current) scoutMarker.current.setLatLng(latlng);
+    else scoutMarker.current = L.marker(latlng, { icon: scoutIcon, keyboard: false, interactive: false }).addTo(map);
+  }, [scoutPos]);
 
   // 下見中の地点へ追従する。ズームは維持して中心だけ寄せる
   useEffect(() => {

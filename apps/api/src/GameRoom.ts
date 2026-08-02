@@ -13,9 +13,11 @@ import type {
   StreetSpot,
 } from "./types";
 import {
+  fetchSpotForImage,
   findStreetPointOnLand,
   setRailAssets,
   moveAI,
+  nearestImage,
   haversineKm,
   bearingDeg,
   buildPlaceHints,
@@ -29,8 +31,14 @@ import {
 const DEFAULT_INTERVAL_MS = 30_000;
 const MIN_INTERVAL_SECONDS = 10;
 const MAX_TIME_LIMIT_SECONDS = 2700;
-// Search & Chase: 逃走者が1ラウンドに使える移動回数
-const RELOCATIONS_PER_ROUND = 2;
+// search/duel: 場所選びの猶予。過ぎたら自動で決めて進行を止めない
+const SETUP_TIMEOUT_MS = 60_000;
+// Search & Chase: 逃走者が1回の移動で進める上限(シークバーでの大ワープ防止)
+const MOVE_CAP_KM = 2.5;
+// 対決: この距離以内で当てたら即勝利
+const DUEL_FIND_KM = 0.5;
+const DUEL_FIND_BONUS = 1500;
+const DUEL_WIN_BONUS = 800;
 const CORRECT_RADIUS_KM = 0.5;
 const CHASE_ROUNDS = 8;
 const DEFAULT_CLASSIC_ROUNDS = 5;
@@ -63,8 +71,12 @@ interface RoomState {
   runnerPosition: LatLng | null;
   /** Search & Chase: 逃走役のプレイヤーID */
   runnerId: string | null;
-  /** Search & Chase: このラウンドで逃走者が使える残り移動回数 */
+  /** Search & Chase: このラウンドで逃走者が使える残り移動回数(旧仕様互換。常に0) */
   relocationsLeft: number;
+  /** search/duel の進行段階 */
+  phase: "setup" | "live" | null;
+  /** 対決: 各プレイヤーが選んだ隠れ場所 */
+  duel: Record<string, { spot: StreetSpot }> | null;
   trail: LatLng[];
   revealedTrail: TrailPoint[];
   imageUrl: string;
@@ -101,6 +113,8 @@ const DEFAULT_STATE: RoomState = {
   runnerPosition: null,
   runnerId: null,
   relocationsLeft: 0,
+  phase: null,
+  duel: null,
   trail: [],
   revealedTrail: [],
   imageUrl: "",
@@ -234,6 +248,13 @@ export class GameRoom extends DurableObject<Env> {
     return "名無しの逃走者";
   }
 
+  /** 特定の接続にだけ通知を出す(操作エラーの案内など) */
+  private tell(ws: WebSocket, message: string) {
+    try {
+      ws.send(JSON.stringify({ type: "notice", message }));
+    } catch {}
+  }
+
   private notice(message: string) {
     this.broadcast({ type: "notice", message });
   }
@@ -350,6 +371,12 @@ export class GameRoom extends DurableObject<Env> {
           { status: 400 }
         );
       }
+      if (body.mode === "duel" && this.playerCount() !== 2) {
+        return Response.json(
+          { ok: false, error: "対決モードはちょうど2人で遊びます（今は" + this.playerCount() + "人）" },
+          { status: 400 }
+        );
+      }
       if (body.mode === "chase") await this.startChaseGame(body.region, body.intervalMs);
       else await this.startClassicGame(body.mode, body.region, body.timeLimitSeconds, body.rounds, body.runnerId);
       return Response.json({ ok: true, state: this.publicState() });
@@ -393,7 +420,7 @@ export class GameRoom extends DurableObject<Env> {
     };
     try {
       const body = (await req.json()) as Record<string, unknown>;
-      if (body?.mode === "classic" || body?.mode === "chase" || body?.mode === "search") result.mode = body.mode;
+      if (body?.mode === "classic" || body?.mode === "chase" || body?.mode === "search" || body?.mode === "duel") result.mode = body.mode;
       if (typeof body?.region === "string") result.region = body.region as RegionKey;
       if (typeof body?.playerId === "string") result.playerId = body.playerId;
       if (typeof body?.runnerId === "string" && body.runnerId.length <= 64) result.runnerId = body.runnerId;
@@ -434,9 +461,15 @@ export class GameRoom extends DurableObject<Env> {
         await this.revealNextHint();
         break;
 
+      case "place": {
+        const id = attachment?.playerId ?? msg.userId ?? "";
+        await this.handlePlace(ws, id, msg.lat, msg.lng);
+        break;
+      }
+
       case "relocate": {
         const id = attachment?.playerId ?? msg.userId ?? "";
-        await this.handleRelocate(id);
+        await this.handleRelocate(ws, id, msg.lat, msg.lng, msg.imageId);
         break;
       }
 
@@ -456,10 +489,20 @@ export class GameRoom extends DurableObject<Env> {
         break;
       }
 
-      case "sync":
+      case "sync": {
         ws.send(JSON.stringify(this.publicState()));
         if (attachment?.playerId === this.gameState.runnerId) this.pushRunnerPosition();
+        const pid = attachment?.playerId;
+        if (this.gameState.mode === "duel" && pid) {
+          if (this.gameState.phase === "live") this.sendDuelPuzzles(ws);
+          else if (this.gameState.phase === "setup" && this.gameState.duel?.[pid]) {
+            try {
+              ws.send(JSON.stringify({ type: "placed" }));
+            } catch {}
+          }
+        }
         break;
+      }
     }
   }
 
@@ -484,6 +527,19 @@ export class GameRoom extends DurableObject<Env> {
     const now = Date.now();
     if (now - (this.lastGuessAt.get(userId) ?? 0) < GUESS_COOLDOWN_MS) return;
     this.lastGuessAt.set(userId, now);
+
+    if (
+      (this.gameState.mode === "search" || this.gameState.mode === "duel") &&
+      this.gameState.phase !== "live"
+    ) {
+      this.tell(ws, "まだ場所選びの最中です。少し待ってください");
+      return;
+    }
+
+    if (this.gameState.mode === "duel") {
+      await this.handleDuelGuess(ws, userId, playerName ?? null, { lat, lng });
+      return;
+    }
 
     if (this.gameState.mode === "search" && userId === this.gameState.runnerId) {
       ws.send(
@@ -563,6 +619,132 @@ export class GameRoom extends DurableObject<Env> {
 
     this.recordGuess(userId, playerName, guess, distanceKm, score);
     await this.advanceChaseRound();
+  }
+
+  /** 対決: 相手の隠れ場所への回答。0.5km以内なら即勝利、そうでなければ両者出揃いで近い方の勝ち */
+  private async handleDuelGuess(ws: WebSocket, userId: string, playerName: string | null, guess: LatLng) {
+    const s = this.gameState;
+    if (!s.duel) return;
+    const ids = Object.keys(s.duel);
+    if (!ids.includes(userId)) {
+      this.tell(ws, "この対決の参加者ではありません");
+      return;
+    }
+    if (s.classicAnswers[userId]) return;
+
+    const oppId = ids.find((x) => x !== userId)!;
+    const target = s.duel[oppId].spot.point;
+    const distanceKm = haversineKm(guess, target);
+    const score = classicScore(distanceKm, regionScaleKm(s.regionUsed), 0);
+
+    s.classicAnswers[userId] = { name: playerName, guess, distanceKm, score };
+    this.ensurePlayer(userId, playerName);
+    this.recordGuess(userId, playerName, guess, distanceKm, score);
+    await this.persist();
+
+    if (distanceKm <= DUEL_FIND_KM) {
+      await this.settleDuel(false, userId);
+      return;
+    }
+
+    if (Object.keys(s.classicAnswers).length < 2) {
+      ws.send(
+        JSON.stringify({
+          type: "result",
+          distanceKm: roundTo(distanceKm, 2),
+          correct: false,
+          score,
+          proximity: proximityBand(distanceKm),
+          bearing: null,
+          roundOver: false,
+          waiting: true,
+        })
+      );
+      this.broadcast(this.publicState());
+      return;
+    }
+
+    await this.settleDuel(false, null);
+  }
+
+  /** 対決の決着。instantWinner が居れば即勝利、いなければ距離の近い方が勝ち */
+  private async settleDuel(timeUp: boolean, instantWinner: string | null) {
+    const s = this.gameState;
+    if (!s.duel) return;
+    const ids = Object.keys(s.duel);
+
+    // 勝者判定
+    let winner: string | null = instantWinner;
+    if (!winner) {
+      const answered = ids.filter((id) => s.classicAnswers[id]);
+      if (answered.length === 1) winner = answered[0];
+      else if (answered.length === 2) {
+        const [a, b] = answered;
+        const da = s.classicAnswers[a].distanceKm;
+        const db = s.classicAnswers[b].distanceKm;
+        winner = da < db ? a : db < da ? b : null;
+      }
+    }
+
+    for (const id of ids) {
+      const ans = s.classicAnswers[id];
+      if (ans) this.awardScore(id, ans.name, ans.score, ans.distanceKm);
+    }
+    if (winner) {
+      const bonus = instantWinner ? DUEL_FIND_BONUS : DUEL_WIN_BONUS;
+      this.awardScore(winner, this.playerLabel(winner), bonus, null);
+      this.notice(
+        instantWinner
+          ? `🏆 ${this.playerLabel(winner)} が相手の隠れ場所を発見！ +${bonus}点`
+          : `🏆 このラウンドは ${this.playerLabel(winner)} の勝ち！（より近かった） +${bonus}点`
+      );
+    } else {
+      this.notice(timeUp ? "⌛ 時間切れ。このラウンドは引き分け" : "🤝 このラウンドは引き分け");
+    }
+
+    s.totalScore = this.roomTopScore();
+    const winAns = winner ? s.classicAnswers[winner] : null;
+    const winTarget = winner ? s.duel[ids.find((x) => x !== winner)!].spot.point : s.duel[ids[0]].spot.point;
+    s.history = [
+      ...s.history,
+      {
+        round: s.round,
+        target: winTarget,
+        guess: winAns?.guess ?? null,
+        distanceKm: winAns ? roundTo(winAns.distanceKm, 2) : null,
+        score: winAns?.score ?? 0,
+        caught: Boolean(instantWinner),
+      },
+    ];
+    s.status = s.round >= s.maxRounds ? "finished" : "reveal";
+
+    await this.ctx.storage.deleteAlarm();
+    await this.persist();
+
+    // 各自に「自分が探していた場所」を正解として返す
+    for (const wsx of this.ctx.getWebSockets()) {
+      const pid = this.attachmentOf(wsx)?.playerId;
+      if (!pid || !ids.includes(pid)) continue;
+      const opp = ids.find((x) => x !== pid)!;
+      const myAns = s.classicAnswers[pid];
+      try {
+        wsx.send(
+          JSON.stringify({
+            type: "result",
+            distanceKm: myAns ? roundTo(myAns.distanceKm, 2) : null,
+            correct: Boolean(myAns && myAns.distanceKm <= DUEL_FIND_KM),
+            score: myAns?.score ?? 0,
+            proximity: myAns ? proximityBand(myAns.distanceKm) : null,
+            bearing: null,
+            target: s.duel![opp].spot.point,
+            timeUp,
+            roundOver: true,
+          })
+        );
+      } catch {}
+    }
+    this.broadcast(this.publicState());
+    if (s.status === "finished") await this.saveFinalScore();
   }
 
   private async handleClassicGuess(
@@ -669,10 +851,174 @@ export class GameRoom extends DurableObject<Env> {
     if (this.gameState.status === "finished") await this.saveFinalScore();
   }
 
+  /** 場所選びの猶予切れ。放置されてもゲームが進むよう自動で決める */
+  private async resolveSetupTimeout() {
+    const s = this.gameState;
+    if (s.phase !== "setup") return;
+    this.announceMoving(true);
+
+    if (s.mode === "search") {
+      const { spot } = await this.resolveSpot(s.region, s.trail);
+      if (!spot) {
+        this.gameState.moving = false;
+        this.notice("場所が見つからずラウンドを終了します");
+        await this.settleClassicRound(true);
+        return;
+      }
+      this.notice("⌛ 時間切れ。逃走者の隠れ場所を自動で決めました");
+      await this.goSearchLive(spot);
+      return;
+    }
+
+    if (s.mode === "duel") {
+      if (!s.duel) s.duel = {};
+      const ids = [...this.onlineIds()];
+      const placedSpots = Object.values(s.duel).map((d) => d.spot.point);
+      for (const id of ids) {
+        if (s.duel[id]) continue;
+        const { spot } = await this.resolveSpot(s.region, placedSpots);
+        if (spot) {
+          s.duel[id] = { spot };
+          placedSpots.push(spot.point);
+        }
+      }
+      this.gameState.moving = false;
+      if (Object.keys(s.duel).length >= 2) {
+        this.notice("⌛ 時間切れ。未選択の隠れ場所は自動で決めました");
+        await this.goDuelLive();
+      } else {
+        this.notice("プレイヤーが足りないため対決を終了します");
+        await this.stopGame();
+      }
+    }
+  }
+
+  /** search: 逃走者が選んだ場所で捜索を開始する */
+  private async goSearchLive(spot: StreetSpot) {
+    const now = Date.now();
+    this.gameState.runnerPosition = spot.point;
+    this.gameState.trail = [...this.gameState.trail, spot.point].slice(-TRAIL_LENGTH);
+    this.applySpot(spot, spot.point);
+    this.gameState.phase = "live";
+    this.gameState.moving = false;
+    this.gameState.lastMoveAt = now;
+    this.gameState.nextUpdateAt = now + this.gameState.intervalMs;
+    this.gameState.roundEndsAt =
+      this.gameState.timeLimitSeconds > 0 ? now + this.gameState.timeLimitSeconds * 1000 : 0;
+
+    await this.ctx.storage.deleteAlarm();
+    if (this.gameState.roundEndsAt > 0) await this.ctx.storage.setAlarm(this.gameState.roundEndsAt);
+
+    this.notice("👣 逃走者が潜伏した！ ストリートビューを手がかりに現在地を当てよう");
+    await this.persist();
+    this.broadcast(this.publicState());
+    this.pushRunnerPosition();
+  }
+
+  /** duel: 両者の場所が揃ったら、相手の地点をそれぞれの「問題」として配って開始する */
+  private async goDuelLive() {
+    const s = this.gameState;
+    if (!s.duel) return;
+    const ids = Object.keys(s.duel);
+    if (ids.length < 2) return;
+
+    const now = Date.now();
+    s.phase = "live";
+    s.moving = false;
+    s.lastMoveAt = now;
+    s.roundEndsAt = s.timeLimitSeconds > 0 ? now + s.timeLimitSeconds * 1000 : 0;
+
+    await this.ctx.storage.deleteAlarm();
+    if (s.roundEndsAt > 0) await this.ctx.storage.setAlarm(s.roundEndsAt);
+
+    this.sendDuelPuzzles();
+    this.notice("⚔ 対決開始！ 相手が選んだ場所を先に見つけろ（0.5km以内で即勝利）");
+    await this.persist();
+    this.broadcast(this.publicState());
+  }
+
+  /** duel: 各プレイヤーに「相手の地点」の映像を配る */
+  private sendDuelPuzzles(only?: WebSocket) {
+    const s = this.gameState;
+    if (s.mode !== "duel" || s.phase !== "live" || !s.duel) return;
+    const ids = Object.keys(s.duel);
+    if (ids.length < 2) return;
+    for (const ws of this.ctx.getWebSockets()) {
+      if (only && ws !== only) continue;
+      const pid = this.attachmentOf(ws)?.playerId;
+      if (!pid || !ids.includes(pid)) continue;
+      const oppId = ids.find((x) => x !== pid)!;
+      const spot = s.duel[oppId].spot;
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "duel_puzzle",
+            imageId: spot.imageId,
+            imageUrl: spot.imageUrl,
+            isPano: spot.isPano,
+            compassAngle: spot.compassAngle ?? null,
+          })
+        );
+      } catch {}
+    }
+  }
+
+  /** search/duel: 地図で選んだ場所を、その付近の車載360°地点に確定する */
+  private async handlePlace(ws: WebSocket, userId: string, lat: number, lng: number) {
+    const s = this.gameState;
+    if (s.status !== "running" || s.phase !== "setup" || s.moving) return;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return;
+
+    if (s.mode === "search") {
+      if (userId !== s.runnerId) {
+        this.tell(ws, "隠れ場所を選べるのは逃走者だけです");
+        return;
+      }
+    } else if (s.mode === "duel") {
+      if (!s.duel) s.duel = {};
+      if (s.duel[userId]) {
+        this.tell(ws, "隠れ場所はもう決まっています。相手を待ちましょう");
+        return;
+      }
+    } else {
+      return;
+    }
+
+    this.announceMoving(true);
+    const spot = await nearestImage(this.env.MAPILLARY_TOKEN, { lat, lng }, { panoOnly: true, carOnly: true });
+
+    if (!spot) {
+      this.gameState.moving = false;
+      this.tell(ws, "その付近に車載の360°画像がありません。別の場所を選んでください");
+      this.broadcast(this.publicState());
+      return;
+    }
+
+    if (s.mode === "search") {
+      try {
+        ws.send(JSON.stringify({ type: "placed" }));
+      } catch {}
+      await this.goSearchLive(spot);
+      return;
+    }
+
+    // duel
+    s.duel![userId] = { spot };
+    s.moving = false;
+    try {
+      ws.send(JSON.stringify({ type: "placed" }));
+    } catch {}
+    const placed = Object.keys(s.duel!).length;
+    this.notice(`🫥 ${this.playerLabel(userId)} が隠れ場所を決めた（${placed}/2）`);
+    await this.persist();
+    this.broadcast(this.publicState());
+    if (placed >= 2) await this.goDuelLive();
+  }
+
   /** 逃走者本人にだけ、いまの自分の位置を届ける(地図に「あなた」マーカーを出すため) */
   private pushRunnerPosition() {
     const s = this.gameState;
-    if (s.mode !== "search" || s.status !== "running" || !s.runnerId || !s.runnerPosition) return;
+    if (s.mode !== "search" || s.status !== "running" || s.phase !== "live" || !s.runnerId || !s.runnerPosition) return;
     for (const ws of this.ctx.getWebSockets()) {
       if (this.attachmentOf(ws)?.playerId !== s.runnerId) continue;
       try {
@@ -682,47 +1028,49 @@ export class GameRoom extends DurableObject<Env> {
   }
 
   /**
-   * Search & Chase: 逃走者の「逃げる」。追手の直近の回答から離れる方向へ、
-   * 車載360°の別地点に移動する(出題と同じ検証を通るので電車には乗れない)。
-   * 回答済みの追手の得点は回答時点の位置で確定済みなので変わらない。
+   * Search & Chase: 逃走者の移動。
+   * 逃走者は映像内を自由に下見でき、間隔が経過したら
+   * 「いま見ている場所」へ実際に移動できる(車載360°のみ・1回2.5kmまで)。
    */
-  private async handleRelocate(userId: string) {
+  private async handleRelocate(ws: WebSocket, userId: string, lat: number, lng: number, imageId: string) {
     const s = this.gameState;
-    if (s.mode !== "search" || s.status !== "running" || s.moving) return;
+    if (s.mode !== "search" || s.status !== "running" || s.phase !== "live" || s.moving) return;
     if (!userId || userId !== s.runnerId) return;
-    if (s.relocationsLeft <= 0) return;
+    if (typeof imageId !== "string" || !imageId) return;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
     if (!s.runnerPosition) return;
 
+    const now = Date.now();
+    if (now < s.nextUpdateAt - 750) {
+      const wait = Math.ceil((s.nextUpdateAt - now) / 1000);
+      this.tell(ws, `まだ移動できません（あと${wait}秒）。映像で下見して待ちましょう`);
+      return;
+    }
+
+    const hopKm = haversineKm(s.runnerPosition, { lat, lng });
+    if (hopKm > MOVE_CAP_KM) {
+      this.tell(ws, `一度に移動できるのは${MOVE_CAP_KM}kmまでです（今は${hopKm.toFixed(1)}km先）`);
+      return;
+    }
+
     this.announceMoving(true);
+    const spot = await fetchSpotForImage(this.env.MAPILLARY_TOKEN, imageId);
 
-    const moved = await moveAI(
-      this.env.MAPILLARY_TOKEN,
-      s.region,
-      s.runnerPosition,
-      s.trail,
-      s.lastBearing,
-      s.roundGuesses,
-      this.env.SESSIONS
-    );
-
-    if (!moved?.spot) {
+    if (!spot) {
       this.gameState.moving = false;
-      this.notice("逃走者は移動先を見つけられなかった…（回数は減りません）");
-      await this.persist();
+      this.tell(ws, "その地点へは移動できません（車載の360°地点だけが隠れ場所になれます）");
       this.broadcast(this.publicState());
       return;
     }
 
-    const position = moved.spot.point;
-    this.gameState.regionUsed = moved.region ?? this.gameState.regionUsed;
-    this.gameState.lastBearing = moved.bearing ?? this.gameState.lastBearing;
-    this.gameState.trail = [...this.gameState.trail, position].slice(-TRAIL_LENGTH);
-    this.applySpot(moved.spot, position);
-    this.gameState.relocationsLeft -= 1;
+    this.gameState.runnerPosition = spot.point;
+    this.gameState.trail = [...this.gameState.trail, spot.point].slice(-TRAIL_LENGTH);
+    this.applySpot(spot, spot.point);
     this.gameState.moving = false;
-    this.gameState.lastMoveAt = Date.now();
+    this.gameState.lastMoveAt = now;
+    this.gameState.nextUpdateAt = now + this.gameState.intervalMs;
 
-    this.notice(`👣 逃走者が移動した！（このラウンド残り${this.gameState.relocationsLeft}回）`);
+    this.notice("👣 逃走者が移動した！");
     await this.persist();
     this.broadcast(this.publicState());
     this.pushRunnerPosition();
@@ -739,7 +1087,7 @@ export class GameRoom extends DurableObject<Env> {
   }
 
   async startClassicGame(
-    mode: "classic" | "search",
+    mode: "classic" | "search" | "duel",
     region: RegionKey,
     timeLimitSeconds: number,
     rounds: number,
@@ -782,13 +1130,15 @@ export class GameRoom extends DurableObject<Env> {
       }
     }
 
-    const { spot, region: used } = await this.resolveSpot(this.gameState.region, this.gameState.trail);
-    const position = spot?.point ?? randomFallbackPoint(this.gameState.region);
-    // Search & Chase では逃走者が動くためヒント(地名)は成立しない
-    const hints =
-      this.gameState.mode === "search"
-        ? []
-        : await buildPlaceHints(position, this.env.SESSIONS, regionHintLevel(used));
+    const needsSetup = this.gameState.mode === "search" || this.gameState.mode === "duel";
+
+    // search/duel はプレイヤーが場所を選ぶまで地点を作らない
+    const { spot, region: used } = needsSetup
+      ? { spot: null as StreetSpot | null, region: this.gameState.region }
+      : await this.resolveSpot(this.gameState.region, this.gameState.trail);
+    const position = spot?.point ?? this.gameState.runnerPosition ?? randomFallbackPoint(this.gameState.region);
+    // 逃走者/相手が場所を選ぶモードでは地名ヒントは成立しない
+    const hints = needsSetup ? [] : await buildPlaceHints(position, this.env.SESSIONS, regionHintLevel(used));
     const now = Date.now();
 
     this.resetRoundScores();
@@ -806,12 +1156,22 @@ export class GameRoom extends DurableObject<Env> {
       roundGuesses: [],
       classicAnswers: {},
       nextUpdateAt: 0,
-      roundEndsAt: this.gameState.timeLimitSeconds > 0 ? now + this.gameState.timeLimitSeconds * 1000 : 0,
-      relocationsLeft: this.gameState.mode === "search" ? RELOCATIONS_PER_ROUND : 0,
+      roundEndsAt: !needsSetup && this.gameState.timeLimitSeconds > 0 ? now + this.gameState.timeLimitSeconds * 1000 : 0,
+      relocationsLeft: 0,
+      phase: needsSetup ? "setup" : null,
+      duel: this.gameState.mode === "duel" ? {} : null,
       moving: false,
       lastMoveAt: now,
     };
     this.applySpot(spot, position);
+    if (needsSetup) {
+      // 場所選び中は「画像なし」扱いにしない(専用の案内を出す)
+      this.gameState.imageMissing = false;
+      this.gameState.runnerPosition = null;
+    }
+    if (this.gameState.mode === "duel") {
+      this.notice("⚔ 対決モード！ まずお互いに地図で「隠れ場所」を選ぼう（相手には見えません）");
+    }
 
     if (this.gameState.imageMissing) {
       this.notice("この地点の写真が見つかりませんでした。ヒントと地図で推理してください");
@@ -821,7 +1181,10 @@ export class GameRoom extends DurableObject<Env> {
     this.broadcast(this.publicState());
     this.pushRunnerPosition();
 
-    if (this.gameState.timeLimitSeconds > 0) {
+    if (needsSetup) {
+      // 場所選びが放置されてもゲームが止まらないように猶予アラーム
+      await this.ctx.storage.setAlarm(now + SETUP_TIMEOUT_MS);
+    } else if (this.gameState.timeLimitSeconds > 0) {
       await this.ctx.storage.setAlarm(this.gameState.roundEndsAt);
     }
   }
@@ -891,6 +1254,16 @@ export class GameRoom extends DurableObject<Env> {
   async alarm() {
     if (this.gameState.status !== "running") return;
     if (this.gameState.moving) return;
+
+    if (this.gameState.phase === "setup") {
+      await this.resolveSetupTimeout();
+      return;
+    }
+
+    if (this.gameState.mode === "duel") {
+      await this.settleDuel(true, null);
+      return;
+    }
 
     if (this.gameState.mode !== "chase") {
       await this.settleClassicRound(true);
@@ -1073,13 +1446,20 @@ export class GameRoom extends DurableObject<Env> {
       totalScore: this.roomTopScore(),
       intervalSeconds: Math.round(s.intervalMs / 1000),
       timeLimitSeconds: s.timeLimitSeconds,
-      nextUpdateAt: s.mode === "chase" && s.status === "running" && !s.moving ? s.nextUpdateAt : 0,
+      nextUpdateAt:
+        (s.mode === "chase" || (s.mode === "search" && s.phase === "live")) &&
+        s.status === "running" &&
+        !s.moving
+          ? s.nextUpdateAt
+          : 0,
       roundEndsAt: s.mode !== "chase" && s.status === "running" && !s.moving ? s.roundEndsAt : 0,
       serverNow: Date.now(),
       players: this.playerCount(exclude),
       hostId: this.hostId(exclude),
       answered: Object.keys(s.classicAnswers).length,
       scoreboard: this.scoreboardList(exclude),
+      phase: s.phase ?? null,
+      placedCount: s.duel ? Object.keys(s.duel).length : 0,
       roster: this.rosterList(),
       runnerId: s.mode === "search" ? s.runnerId : null,
       runnerName: s.mode === "search" && s.runnerId ? this.playerLabel(s.runnerId) : null,

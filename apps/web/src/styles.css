@@ -349,6 +349,35 @@ code {
 .tool-btn.is-on { background: var(--brand); border-color: var(--brand); color: #fff; }
 .tool-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
+/* Search & Chase: 逃走者の下見地点(移動の候補)。確定位置と区別する中抜き */
+.scout-icon { pointer-events: none; }
+
+.scout-dot {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: transparent;
+  border: 3px dashed #2f7df6;
+  box-shadow: 0 0 0 2px rgb(255 255 255 / 85%);
+}
+
+.scout-label {
+  position: absolute;
+  left: 50%;
+  top: -19px;
+  transform: translateX(-50%);
+  background: rgb(47 125 246 / 88%);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
 /* Search & Chase: 逃走者本人の現在地マーカー */
 .runner-self-icon { pointer-events: none; }
 
