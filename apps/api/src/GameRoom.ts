@@ -1202,6 +1202,10 @@ export class GameRoom extends DurableObject<Env> {
       this.tell(ws, `一度に移動できるのは${MOVE_CAP_KM}kmまでです（今は${hopKm.toFixed(1)}km先）`);
       return;
     }
+    if (hopKm < 0.03) {
+      this.tell(ws, "すでにその場所にいます（間隔は消費しません）");
+      return;
+    }
 
     this.announceMoving(true);
     const spot = await nearestImage(this.env.MAPILLARY_TOKEN, { lat, lng }, { panoOnly: false, carOnly: true });
