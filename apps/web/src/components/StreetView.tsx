@@ -499,7 +499,7 @@ const StreetView = forwardRef<StreetViewHandle, Props>(function StreetView(
           lng: String(current.lng),
           exclude: current.id,
           car: "1",
-          pano: "1",
+          pano: "0",
           minKm: "0.05",
         });
         if (current.sequenceId) params.set("excludeSeq", current.sequenceId);

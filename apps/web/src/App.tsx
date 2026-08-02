@@ -469,7 +469,7 @@ export default function App() {
     if (!guessPin) return;
     setExploreLoading(true);
     try {
-      const res = await fetch(`${API_URL}/nearby-image?lat=${guessPin.lat}&lng=${guessPin.lng}&car=1&pano=1`);
+      const res = await fetch(`${API_URL}/nearby-image?lat=${guessPin.lat}&lng=${guessPin.lng}&car=1&pano=0`);
       const data = await res.json();
       if (data?.found && data.imageId) {
         setExplore({ imageId: data.imageId, imageUrl: data.imageUrl ?? "" });
@@ -1433,12 +1433,15 @@ export default function App() {
                   <strong>Search &amp; Chase</strong>（2人以上）: 逃走者がまず地図で隠れ場所を選び、
                   以後はストリートビューの中を自由に下見しながら、設定した間隔ごとに
                   「いま見ている場所」へ実際に移動できます（1回2.5kmまで）。追手は映像から現在地を特定。
+                  隠れ場所は360°が優先されますが、車から撮影した平面写真の道も選べます。
                   逃走者の得点は「追手の平均点が低いほど」高くなります。ヒントは使えません。
                 </p>
                 <p className="note">
                   <strong>対決</strong>（2人専用）: お互いに地図で隠れ場所を出し合い、相手が選んだ場所の
-                  ストリートビューだけを頼りに探します。0.5km以内で当てたら即勝利(+1500)、
-                  そうでなければ近かった方の勝ち(+800)。
+                  ストリートビューだけを頼りに<strong>先に見つけた方の勝ち</strong>。
+                  回答は何度でもでき、外すたびに距離と方角のヒントが出ます。
+                  0.5km以内で発見なら即勝利(+1500)。時間切れ（制限なしは10分扱い）のときは
+                  最も近づけた方の勝ち(+800)。
                 </p>
                 <p className="note">設定を変えたら上の「スタート」でやり直します。</p>
 

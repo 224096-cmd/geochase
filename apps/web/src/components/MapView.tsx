@@ -520,7 +520,10 @@ export default function MapView({
   }, [markerPosition, locked]);
 
   useEffect(() => {
-    if (coverageHint) setShowPano(true);
+    if (coverageHint) {
+      setShowPano(true);
+      setShowFlat(true);
+    }
   }, [coverageHint]);
 
   // カバレッジ表示の切替をGLレイヤーへ反映
@@ -670,7 +673,7 @@ export default function MapView({
               e.stopPropagation();
               setShowPano((v) => !v);
             }}
-            title="車載を含む360°パノラマがある道を緑の線で表示します(隠れ場所に選べるのはこの近く)"
+            title="360°パノラマがある道を緑で表示します(いちばん遊びやすい候補)"
           >
             🟢 360°の道
           </button>
@@ -681,7 +684,7 @@ export default function MapView({
               e.stopPropagation();
               setShowFlat((v) => !v);
             }}
-            title="360°ではない撮影(平面写真)だけがある道を表示します(隠れ場所には選べません)"
+            title="平面写真だけの道を表示します(車載ならここも隠れ場所に選べます)"
           >
             ⚪ 平面のみの道
           </button>

@@ -45,6 +45,7 @@ const QUALITY_TIERS: QualityTier[] = [
   { label: "pano-best", pano: true, minWidth: 5000, freshYears: 8, walkable: true },
   { label: "pano-good", pano: true, minWidth: 3800, freshYears: 12, walkable: true },
   { label: "pano-any", pano: true, minWidth: 0, freshYears: 0, walkable: false },
+  { label: "flat-any", pano: false, minWidth: 0, freshYears: 0, walkable: false },
 ];
 
 const YEAR_MS = 365.25 * 24 * 60 * 60 * 1000;
@@ -637,9 +638,7 @@ function rankCandidates(pool: RawImage[]): Candidate[] {
   const out: Candidate[] = [];
   for (let i = 0; i < shuffled.length; i++) {
     const img = shuffled[i];
-    // 出題候補は「360°パノラマ」かつ「自動車」だけ。
-    // 一方向しか見えない平面画像や電車・徒歩の列はここで落とす
-    if (img.is_pano !== true) continue;
+    // 出題候補は「自動車」の列だけ。360°は必須ではなく強い優先(平面の車載も可)
     const seqStats = img.sequence ? stats.get(img.sequence) : undefined;
     const transport = classifyTransport(seqStats, img);
     if (transport !== "car") continue;
@@ -653,6 +652,7 @@ function rankCandidates(pool: RawImage[]): Candidate[] {
     const seqLength = seqStats?.count ?? 1;
     const age = ageYears(img);
     const score =
+      (img.is_pano === true ? 1_200_000 : 0) +
       Math.max(0, 1 - age / 10) * 900_000 +
       Math.min(neighbors, 30) * 20_000 +
       Math.min(seqLength, 40) * 13_000;
@@ -967,12 +967,7 @@ async function selectBestSpot(
       const merged: RawImage = detail ? { ...c.img, ...detail } : c.img;
       return { ...c, img: merged };
     })
-    .filter(
-      (c) =>
-        c.img.is_pano === true &&
-        classifyTransport(undefined, c.img) !== "foot" &&
-        c.img.on_foot !== true
-    );
+    .filter((c) => classifyTransport(undefined, c.img) !== "foot" && c.img.on_foot !== true);
 
   if (enriched.length === 0) return null;
 
@@ -1009,7 +1004,7 @@ const SEED_TTL_SEC = 60 * 60 * 24 * 60;
 
 // v3: パノラマ＋車載だけを保存する。v2以前の平面画像シードは使わない
 function seedKey(region: RegionKey): string {
-  return `seeds:v5:${region}`;
+  return `seeds:v6:${region}`;
 }
 
 async function loadSeeds(kv: KVNamespace | undefined, region: RegionKey): Promise<Seed[]> {
@@ -1023,7 +1018,7 @@ async function loadSeeds(kv: KVNamespace | undefined, region: RegionKey): Promis
 
 // サムネイルURLには期限があるのでIDだけ保存し、使うときに取り直す
 async function rememberSeed(kv: KVNamespace | undefined, region: RegionKey, spot: StreetSpot): Promise<void> {
-  if (!kv || !spot.imageId || !spot.isPano) return;
+  if (!kv || !spot.imageId) return;
   try {
     const seeds = await loadSeeds(kv, region);
     if (seeds.some((s) => s.id === spot.imageId)) return;
@@ -1054,7 +1049,7 @@ async function spotFromSeeds(
   const details = await fetchDetails(token, pick.map((s) => s.id), budget);
   for (const seed of pick) {
     const img = details.get(seed.id);
-    if (img && img.is_pano === true && img.on_foot !== true) return toSpot(img, { transport: "car" });
+    if (img && img.on_foot !== true) return toSpot(img, { transport: "car" });
   }
   return null;
 }
@@ -1225,7 +1220,7 @@ export async function fetchSpotForImage(token: string, imageId: string): Promise
   const budget = new SearchBudget(5);
   const details = await fetchDetails(token, [imageId], budget);
   const img = details.get(imageId);
-  if (!img || img.is_pano !== true || img.on_foot === true) return null;
+  if (!img || img.on_foot === true) return null;
   if (!(await verifyCarSequence(token, img.sequence, budget))) return null;
   return toSpot(img, { transport: "car" });
 }
