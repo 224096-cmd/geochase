@@ -94,6 +94,8 @@ export interface PublicState {
   hostId: string | null;
   answered: number;
   scoreboard: PlayerScore[];
+  /** 接続中のプレイヤー一覧(逃走者の指名UI用) */
+  roster: { id: string; name: string | null }[];
   /** Search & Chase: 逃走役のプレイヤーID(他モードではnull) */
   runnerId: string | null;
   runnerName: string | null;

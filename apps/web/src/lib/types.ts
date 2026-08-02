@@ -57,6 +57,8 @@ export interface RoomState {
   hostId?: string | null;
   answered?: number;
   scoreboard?: PlayerScore[];
+  /** 接続中のプレイヤー一覧(逃走者の指名UI用) */
+  roster?: { id: string; name: string | null }[];
   /** Search & Chase: 逃走役プレイヤー(他モードではnull) */
   runnerId?: string | null;
   runnerName?: string | null;
@@ -101,6 +103,8 @@ export interface StartOptions {
   intervalSeconds: number;
   timeLimitSeconds: number;
   rounds: number;
+  /** Search & Chase: 逃走者の指名(省略でランダム) */
+  runnerId?: string;
 }
 
 export type StageMode = "split" | "street" | "map";

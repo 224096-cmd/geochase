@@ -94,8 +94,11 @@ const MIN_SPLIT = 0.25;
 const MAX_SPLIT = 0.75;
 const DEFAULT_SPLIT = 0.56;
 
-const DEFAULT_SETTINGS: StartOptions = {
+type Settings = StartOptions & { runnerChoice: string };
+
+const DEFAULT_SETTINGS: Settings = {
   mode: "chase",
+  runnerChoice: "random",
   region: "japan_wide",
   intervalSeconds: 60,
   timeLimitSeconds: 0,
@@ -139,10 +142,12 @@ function useIsWide(): boolean {
   return wide;
 }
 
-function loadSettings(): StartOptions {
+function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : DEFAULT_SETTINGS;
+    const merged = raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : DEFAULT_SETTINGS;
+    // 指名は毎回選び直す(前回のルームのIDを引きずらない)
+    return { ...merged, runnerChoice: "random" };
   } catch {
     return DEFAULT_SETTINGS;
   }
@@ -167,7 +172,7 @@ export default function App() {
   const isWide = useIsWide();
   const [roomId] = useState(resolveRoomId);
   const [playerName, setPlayerName] = useState(resolvePlayerName);
-  const [settings, setSettings] = useState<StartOptions>(loadSettings);
+  const [settings, setSettings] = useState<Settings>(loadSettings);
   const [panel, setPanel] = useState<PanelKey>(null);
   const [regions, setRegions] = useState<RegionItem[]>([]);
   const [regionError, setRegionError] = useState<string | null>(null);
@@ -199,6 +204,8 @@ export default function App() {
   const [playSpeed, setPlaySpeed] = useState(loadPlaySpeed);
   // シークバーのドラッグ中の値。確定(移動)は250msの静止後
   const [seekDraft, setSeekDraft] = useState<number | null>(null);
+  // Search & Chase: 逃走者本人にだけサーバから届く現在地
+  const [runnerPos, setRunnerPos] = useState<LatLng | null>(null);
   const seekTimerRef = useRef<number | null>(null);
   const onSeekInput = useCallback((idx: number) => {
     setSeekDraft(idx);
@@ -246,6 +253,7 @@ export default function App() {
     onResult: handleResult,
     onCaught: handleCaught,
     onNotice: showToast,
+    onRunnerPos: setRunnerPos,
   });
 
   const isHost = !state?.hostId || state.hostId === playerId;
@@ -391,7 +399,17 @@ export default function App() {
     setExplore(null);
     setExplorePin(null);
     try {
-      await start(settings);
+      if (settings.mode === "search" && (state?.players ?? 1) < 2) {
+        showToast("Search & Chase は2人以上で遊べます（招待リンクを共有してください）");
+        return;
+      }
+      const { runnerChoice, ...opts } = settings;
+      if (settings.mode === "search" && runnerChoice !== "random") {
+        opts.runnerId = runnerChoice;
+      } else {
+        delete opts.runnerId;
+      }
+      await start(opts);
       setPanel(null);
     } catch (err) {
       showToast(err instanceof Error ? err.message : "スタートに失敗しました");
@@ -619,6 +637,10 @@ export default function App() {
       : { imageId: state?.imageId ?? "", imageUrl: state?.imageUrl ?? "" };
 
   const isRunner = state?.mode === "search" && Boolean(state.runnerId) && state.runnerId === playerId;
+
+  useEffect(() => {
+    if (!isRunner || state?.status !== "running") setRunnerPos(null);
+  }, [isRunner, state?.status, state?.round]);
 
   const urgency = countdown ? (countdown.ratio < 0.15 ? "critical" : countdown.ratio < 0.4 ? "warn" : "calm") : "calm";
 
@@ -1027,7 +1049,8 @@ export default function App() {
               compact={mapCompact}
               onExplore={guessPin && isRunning && !isMoving ? exploreHere : undefined}
               exploreLoading={exploreLoading}
-              panTo={streetSource === "explore" ? explorePin : null}
+              runnerPos={isRunner ? runnerPos : null}
+              panTo={isRunner ? runnerPos : streetSource === "explore" ? explorePin : null}
             />
           </section>
 
@@ -1156,6 +1179,28 @@ export default function App() {
                     <option value="search">Search &amp; Chase（1人が逃げる対戦）</option>
                   </select>
                 </label>
+
+                {settings.mode === "search" && (
+                  <label className="field">
+                    <span>逃走者の決め方</span>
+                    <select
+                      value={settings.runnerChoice}
+                      onChange={(e) => setSettings((s) => ({ ...s, runnerChoice: e.target.value }))}
+                      disabled={isRunning || !isHost}
+                    >
+                      <option value="random">🎲 ランダムに選ぶ</option>
+                      {(state?.roster ?? []).map((p) => (
+                        <option key={p.id} value={p.id}>
+                          👣 {p.name ?? "名無し"}
+                          {p.id === playerId ? "（あなた）" : ""}
+                        </option>
+                      ))}
+                    </select>
+                    {(state?.players ?? 1) < 2 && (
+                      <span className="field-warn">⚠ 2人以上で遊べます。上の招待リンクを共有してください</span>
+                    )}
+                  </label>
+                )}
 
                 <label className="field">
                   <span>捜索範囲（{regions.length}件）</span>

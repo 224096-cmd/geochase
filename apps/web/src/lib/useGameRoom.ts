@@ -33,6 +33,8 @@ interface Options {
   onResult: (result: GuessResult) => void;
   onCaught: (playerName: string | null, score: number) => void;
   onNotice: (message: string) => void;
+  /** Search & Chase: 逃走者本人にだけ届く現在地 */
+  onRunnerPos?: (position: { lat: number; lng: number }) => void;
 }
 
 /**
@@ -42,7 +44,7 @@ interface Options {
  *  - サーバー時刻との差分を保持し、カウントダウンをローカル時計のズレなしで計算する
  *  - 接続時に playerId を渡し、サーバー側でホスト判定と個別の連打防止に使う
  */
-export function useGameRoom({ roomId, playerName, onResult, onCaught, onNotice }: Options) {
+export function useGameRoom({ roomId, playerName, onResult, onCaught, onNotice, onRunnerPos }: Options) {
   const [state, setState] = useState<RoomState | null>(null);
   const [connection, setConnection] = useState<ConnectionStatus>("connecting");
   const [playerId] = useState(resolvePlayerId);
@@ -54,8 +56,8 @@ export function useGameRoom({ roomId, playerName, onResult, onCaught, onNotice }
   const heartbeat = useRef<number | null>(null);
   const closedByUs = useRef(false);
 
-  const handlers = useRef({ onResult, onCaught, onNotice });
-  handlers.current = { onResult, onCaught, onNotice };
+  const handlers = useRef({ onResult, onCaught, onNotice, onRunnerPos });
+  handlers.current = { onResult, onCaught, onNotice, onRunnerPos };
 
   // 名前は接続を張り直さずに反映したいので、refで最新値を持つ
   const nameRef = useRef(playerName);

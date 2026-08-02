@@ -15,6 +15,14 @@ function makePinIcon(color: string) {
 }
 
 const guessPinIcon = makePinIcon("#E0483E");
+
+// Search & Chase: 逃走者本人にだけ見える「あなたの現在地」
+const runnerSelfIcon = L.divIcon({
+  className: "runner-self-icon",
+  html: '<span class="runner-self-dot"></span><span class="runner-self-label">あなた</span>',
+  iconSize: [16, 16],
+  iconAnchor: [8, 8],
+});
 const targetPinIcon = makePinIcon("#4FD1A5");
 
 // 地図タイルは完全無料・商用可のものだけ。
@@ -138,6 +146,8 @@ async function buildJapaneseStyle(): Promise<unknown | null> {
 interface Props {
   onPick: (lat: number, lng: number) => void;
   markerPosition?: LatLng | null;
+  /** Search & Chase: 逃走者本人の現在地(本人以外はnull) */
+  runnerPos?: LatLng | null;
   targetPosition?: LatLng | null;
   trail?: TrailPoint[];
   locked?: boolean;
@@ -150,6 +160,7 @@ interface Props {
 export default function MapView({
   onPick,
   markerPosition,
+  runnerPos,
   targetPosition,
   trail = [],
   locked = false,
@@ -358,6 +369,21 @@ export default function MapView({
     }
     guessMarker.current.dragging?.[locked ? "disable" : "enable"]();
   }, [markerPosition, locked]);
+
+  // 逃走者の自位置マーカー(青い点)。位置が来たら出し、消えたら片付ける
+  const runnerMarker = useRef<L.Marker | null>(null);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (!runnerPos) {
+      runnerMarker.current?.remove();
+      runnerMarker.current = null;
+      return;
+    }
+    const latlng = L.latLng(runnerPos.lat, runnerPos.lng);
+    if (runnerMarker.current) runnerMarker.current.setLatLng(latlng);
+    else runnerMarker.current = L.marker(latlng, { icon: runnerSelfIcon, keyboard: false, interactive: false }).addTo(map);
+  }, [runnerPos]);
 
   // 下見中の地点へ追従する。ズームは維持して中心だけ寄せる
   useEffect(() => {
