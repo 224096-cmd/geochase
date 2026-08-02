@@ -21,12 +21,9 @@ jobs:
         working-directory: apps/api
         run: npm install
 
+      # wrangler-action はエラー詳細を隠すため、直接実行して全文をログに出す
       - name: Deploy to Cloudflare Workers
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          workingDirectory: apps/api
-          # 線路タイル([assets])はwrangler 3.78未満だと構成エラーで失敗する。
-          # アクション既定の古い版を使わないようバージョンを固定する
-          wranglerVersion: "3.114.1"
-          command: deploy
+        working-directory: apps/api
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx --yes wrangler@3.114.1 deploy
