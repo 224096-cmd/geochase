@@ -18,6 +18,7 @@ import {
   setRailAssets,
   moveAI,
   nearestImage,
+  REGION_DEFS,
   haversineKm,
   bearingDeg,
   buildPlaceHints,
@@ -35,8 +36,14 @@ const MAX_TIME_LIMIT_SECONDS = 2700;
 const SETUP_TIMEOUT_MS = 60_000;
 // Search & Chase: 逃走者が1回の移動で進める上限(シークバーでの大ワープ防止)
 const MOVE_CAP_KM = 2.5;
-// Search & Chase: 行き止まり脱出用「地図ジャンプ」の1ラウンド上限
-const SEARCH_JUMPS_PER_ROUND = 2;
+// Search & Chase: 逃走者は「最接近された距離」で採点。この距離まで離せば満点
+const SEARCH_SAFE_KM = 1.0;
+// Search & Chase: 逃走者がこの時間動かないと追手へ「潜伏中」通知が出る
+const SEARCH_IDLE_FACTOR = 2; // intervalMs × 2
+// 対決: 1人あたりの回答回数上限(絨毯爆撃の防止)
+const DUEL_MAX_TRIES = 5;
+// 対決: 時間切れ時、片方しか回答していない場合はこの距離以内でなければ引き分け
+const DUEL_TIMEUP_MIN_KM = 10;
 // 対決: この距離以内で当てたら即勝利
 const DUEL_FIND_KM = 0.5;
 const DUEL_FIND_BONUS = 1500;
@@ -81,8 +88,12 @@ interface RoomState {
   duel: Record<string, { spot: StreetSpot }> | null;
   /** 対決: 開始時に確定した参加者2名(途中参加の割り込み防止) */
   duelPlayers: string[] | null;
-  /** Search & Chase: 行き止まり脱出用の地図ジャンプ残り回数 */
+  /** 旧: 地図ジャンプ回数(撤廃済み・常に0) */
   searchJumpsLeft: number;
+  /** 対決: 各プレイヤーの回答使用回数 */
+  duelTries: Record<string, number>;
+  /** Search & Chase: 「潜伏中」通知を出したか(1回だけ) */
+  searchIdleNotified: boolean;
   trail: LatLng[];
   revealedTrail: TrailPoint[];
   imageUrl: string;
@@ -123,6 +134,8 @@ const DEFAULT_STATE: RoomState = {
   duel: null,
   duelPlayers: null,
   searchJumpsLeft: 0,
+  duelTries: {},
+  searchIdleNotified: false,
   trail: [],
   revealedTrail: [],
   imageUrl: "",
@@ -261,6 +274,20 @@ export class GameRoom extends DurableObject<Env> {
     try {
       ws.send(JSON.stringify({ type: "notice", message }));
     } catch {}
+  }
+
+  /** 場所選びのピンが、設定エリア(県・地方・国など)の範囲内かを判定する */
+  private pinInRegion(lat: number, lng: number): boolean {
+    const def = REGION_DEFS[this.gameState.region];
+    if (!def?.bboxes?.length) return true;
+    const pad = 0.05;
+    return def.bboxes.some(
+      ([w, s, e, n]) => lng >= w - pad && lng <= e + pad && lat >= s - pad && lat <= n + pad
+    );
+  }
+
+  private regionLabel(): string {
+    return REGION_DEFS[this.gameState.region]?.label ?? "選択エリア";
   }
 
   private notice(message: string) {
@@ -656,6 +683,13 @@ export class GameRoom extends DurableObject<Env> {
       return;
     }
 
+    const used = s.duelTries[userId] ?? 0;
+    if (used >= DUEL_MAX_TRIES) {
+      this.tell(ws, `回答回数(${DUEL_MAX_TRIES}回)を使い切りました。時間切れ時は最接近記録で勝負です`);
+      return;
+    }
+    s.duelTries[userId] = used + 1;
+
     const oppId = ids.find((x) => x !== userId)!;
     const target = s.duel[oppId].spot.point;
     const distanceKm = haversineKm(guess, target);
@@ -696,9 +730,14 @@ export class GameRoom extends DurableObject<Env> {
         proximity: proximityBand(distanceKm),
         bearing: distanceKm <= 25 ? Math.round(bearingDeg(guess, target)) : null,
         roundOver: false,
+        attemptsLeft: DUEL_MAX_TRIES - (s.duelTries[userId] ?? 0),
       })
     );
     this.broadcast(this.publicState());
+
+    // 両者とも使い切ったら時間を待たず決着
+    const allSpent = ids.every((id) => (s.duelTries[id] ?? 0) >= DUEL_MAX_TRIES);
+    if (allSpent) await this.settleDuel(false, null);
   }
 
   /** 対決の決着。instantWinner が居れば即勝利、いなければ距離の近い方が勝ち */
@@ -711,7 +750,10 @@ export class GameRoom extends DurableObject<Env> {
     let winner: string | null = instantWinner;
     if (!winner) {
       const tried = ids.filter((id) => s.classicAnswers[id]);
-      if (tried.length === 1) winner = tried[0];
+      if (tried.length === 1) {
+        // 適当な1発 vs 慎重な未回答、を「勝ち」にしない
+        winner = s.classicAnswers[tried[0]].distanceKm <= DUEL_TIMEUP_MIN_KM ? tried[0] : null;
+      }
       else if (tried.length === 2) {
         const [a, b] = tried;
         const da = s.classicAnswers[a].distanceKm;
@@ -733,7 +775,7 @@ export class GameRoom extends DurableObject<Env> {
           : `🏆 このラウンドは ${this.playerLabel(winner)} の勝ち！（最接近記録がより近い） +${bonus}点`
       );
     } else {
-      this.notice(timeUp ? "⌛ 時間切れ。このラウンドは引き分け" : "🤝 このラウンドは引き分け");
+      this.notice(timeUp ? "⌛ 時間切れ。決め手なしで引き分け（10km以内の記録が必要）" : "🤝 このラウンドは引き分け");
     }
 
     s.totalScore = this.roomTopScore();
@@ -834,17 +876,17 @@ export class GameRoom extends DurableObject<Env> {
       if (!best || ans.distanceKm < best.distanceKm) best = ans;
     }
 
-    // Search & Chase: 逃走者は「追手の平均点が低いほど」高得点。
-    // 誰も回答しなかった(全員時間切れ)ラウンドは満点で逃げ切り
+    // Search & Chase: 逃走者の得点は「最も近づかれた距離」で決まる。
+    // 1km以上離しきれば満点。人数に依存せず、追手の談合(わざと外す)も効かない
     if (this.gameState.mode === "search" && this.gameState.runnerId) {
-      const mean =
-        entries.length > 0
-          ? entries.reduce((sum, [, a]) => sum + a.score, 0) / entries.length
-          : 0;
-      const runnerScore = Math.max(0, 5000 - Math.round(mean));
+      const bestDist = best ? best.distanceKm : null;
+      const runnerScore =
+        bestDist === null ? 5000 : Math.round(5000 * Math.min(1, bestDist / SEARCH_SAFE_KM));
       this.awardScore(this.gameState.runnerId, this.playerLabel(this.gameState.runnerId), runnerScore, null);
       this.notice(
-        `👣 逃走者 ${this.playerLabel(this.gameState.runnerId)} は +${runnerScore}点（追手の平均 ${Math.round(mean)}点）`
+        bestDist === null
+          ? `👣 逃走者 ${this.playerLabel(this.gameState.runnerId)} は完全逃げ切り！ +5000点`
+          : `👣 逃走者 ${this.playerLabel(this.gameState.runnerId)} は +${runnerScore}点（最接近 ${roundTo(bestDist, 2)}km）`
       );
     }
 
@@ -941,7 +983,7 @@ export class GameRoom extends DurableObject<Env> {
       this.gameState.timeLimitSeconds > 0 ? now + this.gameState.timeLimitSeconds * 1000 : 0;
 
     await this.ctx.storage.deleteAlarm();
-    if (this.gameState.roundEndsAt > 0) await this.ctx.storage.setAlarm(this.gameState.roundEndsAt);
+    await this.armSearchAlarm();
 
     this.notice("👣 逃走者が潜伏した！ ストリートビューを手がかりに現在地を当てよう");
     await this.persist();
@@ -1003,6 +1045,11 @@ export class GameRoom extends DurableObject<Env> {
     const s = this.gameState;
     if (s.status !== "running" || s.phase !== "setup" || s.moving) return;
     if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return;
+
+    if (!this.pinInRegion(lat, lng)) {
+      this.tell(ws, `隠れ場所は「${this.regionLabel()}」の範囲内から選んでください`);
+      return;
+    }
 
     if (s.mode === "search") {
       if (userId !== s.runnerId) {
@@ -1114,11 +1161,13 @@ export class GameRoom extends DurableObject<Env> {
     this.gameState.moving = false;
     this.gameState.lastMoveAt = now;
     this.gameState.nextUpdateAt = now + this.gameState.intervalMs;
+    this.gameState.searchIdleNotified = false;
 
     this.notice("👣 逃走者が移動した！");
     await this.persist();
     this.broadcast(this.publicState());
     this.pushRunnerPosition();
+    await this.armSearchAlarm();
   }
 
   /**
@@ -1133,10 +1182,6 @@ export class GameRoom extends DurableObject<Env> {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
     if (!s.runnerPosition) return;
 
-    if (s.searchJumpsLeft <= 0) {
-      this.tell(ws, "地図ジャンプは使い切りました（映像内の移動は引き続き可能）");
-      return;
-    }
     const now = Date.now();
     if (now < s.nextUpdateAt - 750) {
       const wait = Math.ceil((s.nextUpdateAt - now) / 1000);
@@ -1162,15 +1207,26 @@ export class GameRoom extends DurableObject<Env> {
     this.gameState.runnerPosition = spot.point;
     this.gameState.trail = [...this.gameState.trail, spot.point].slice(-TRAIL_LENGTH);
     this.applySpot(spot, spot.point);
-    this.gameState.searchJumpsLeft -= 1;
     this.gameState.moving = false;
     this.gameState.lastMoveAt = now;
     this.gameState.nextUpdateAt = now + this.gameState.intervalMs;
+    this.gameState.searchIdleNotified = false;
 
-    this.notice(`👣 逃走者が別の道へ跳んだ！（地図ジャンプ 残り${this.gameState.searchJumpsLeft}回）`);
+    this.notice("👣 逃走者が移動した！（地図指定）");
     await this.persist();
     this.broadcast(this.publicState());
     this.pushRunnerPosition();
+    await this.armSearchAlarm();
+  }
+
+  /** search(live): 「時間切れ」と「停滞通知」の早い方でアラームを張る */
+  private async armSearchAlarm() {
+    const s = this.gameState;
+    if (s.mode !== "search" || s.phase !== "live" || s.status !== "running") return;
+    const idleAt = s.searchIdleNotified ? Infinity : s.lastMoveAt + s.intervalMs * SEARCH_IDLE_FACTOR;
+    const endAt = s.roundEndsAt > 0 ? s.roundEndsAt : Infinity;
+    const next = Math.min(idleAt, endAt);
+    if (Number.isFinite(next)) await this.ctx.storage.setAlarm(next);
   }
 
   async revealNextHint() {
@@ -1256,7 +1312,9 @@ export class GameRoom extends DurableObject<Env> {
       nextUpdateAt: 0,
       roundEndsAt: !needsSetup && this.gameState.timeLimitSeconds > 0 ? now + this.gameState.timeLimitSeconds * 1000 : 0,
       relocationsLeft: 0,
-      searchJumpsLeft: this.gameState.mode === "search" ? SEARCH_JUMPS_PER_ROUND : 0,
+      searchJumpsLeft: 0,
+      duelTries: {},
+      searchIdleNotified: false,
       phase: needsSetup ? "setup" : null,
       duel: this.gameState.mode === "duel" ? {} : null,
       moving: false,
@@ -1361,6 +1419,24 @@ export class GameRoom extends DurableObject<Env> {
 
     if (this.gameState.mode === "duel") {
       await this.settleDuel(true, null);
+      return;
+    }
+
+    if (this.gameState.mode === "search" && this.gameState.phase === "live") {
+      const s = this.gameState;
+      const now = Date.now();
+      const timeUp = s.roundEndsAt > 0 && now >= s.roundEndsAt - 400;
+      if (!timeUp) {
+        // 停滞通知(1回だけ)。動かない逃走者は追手に居場所の「鮮度」を教えてしまう
+        if (!s.searchIdleNotified) {
+          s.searchIdleNotified = true;
+          this.notice("🕵️ 逃走者はしばらく同じ場所に潜んでいるようだ…（映像は最新の潜伏地点）");
+          await this.persist();
+        }
+        await this.armSearchAlarm();
+        return;
+      }
+      await this.settleClassicRound(true);
       return;
     }
 

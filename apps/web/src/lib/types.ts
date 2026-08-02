@@ -75,6 +75,8 @@ export interface RoomState {
 }
 
 export interface GuessResult {
+  /** 対決: この回答後の残り回数 */
+  attemptsLeft?: number;
   type: "result";
   distanceKm: number | null;
   correct: boolean;
@@ -100,7 +102,31 @@ export interface NoticeMessage {
   message: string;
 }
 
-export type ServerMessage = RoomState | GuessResult | CaughtMessage | NoticeMessage;
+export interface RunnerPosMessage {
+  type: "runner_pos";
+  position: { lat: number; lng: number };
+}
+
+export interface PlacedMessage {
+  type: "placed";
+}
+
+export interface DuelPuzzleMessage {
+  type: "duel_puzzle";
+  imageId: string;
+  imageUrl: string;
+  isPano: boolean;
+  compassAngle: number | null;
+}
+
+export type ServerMessage =
+  | RoomState
+  | GuessResult
+  | CaughtMessage
+  | NoticeMessage
+  | RunnerPosMessage
+  | PlacedMessage
+  | DuelPuzzleMessage;
 
 export interface StartOptions {
   mode: Mode;

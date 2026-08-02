@@ -808,8 +808,7 @@ export default function App() {
     if (isRunner && phase === "live") {
       const remainMs = Math.max(0, (state?.nextUpdateAt ?? 0) - serverNow());
       const ready = remainMs <= 0;
-      const jumps = state?.searchJumpsLeft ?? 0;
-      const jumpMode = Boolean(guessPin) && jumps > 0;
+      const jumpMode = Boolean(guessPin);
       return {
         onClick: () => {
           if (jumpMode && guessPin) {
@@ -828,14 +827,14 @@ export default function App() {
         },
         disabled: !isRunning || isMoving || !ready,
         title: jumpMode
-          ? "行き止まり脱出用。地図で指した近くの道へ跳びます（2.5km以内・回数制）"
+          ? "地図で指した近くの道へ移動します（間隔ごとに1回・2.5km以内）"
           : "いま映像で見ている場所へ実際に移動します（1回2.5kmまで）",
         label: isMoving
           ? "移動中…"
           : !ready
           ? `⏳ 次の移動まで ${formatClock(remainMs / 1000)}（下見/ジャンプ先指定OK）`
           : jumpMode
-          ? `🗺 ピンの道へジャンプ（残り${jumps}回）`
+          ? "🗺 ピンの場所へ移動する"
           : scoutPos
           ? "📍 この映像の場所へ移動する"
           : "映像を動かすか地図でジャンプ先を選ぶ",
@@ -877,7 +876,6 @@ export default function App() {
     state?.phase,
     state?.placedCount,
     state?.nextUpdateAt,
-    state?.searchJumpsLeft,
     placing,
     placedSelf,
     scoutPos,
@@ -1140,9 +1138,9 @@ export default function App() {
                   {state.mode === "duel"
                     ? placedSelf
                       ? `（${state.placedCount ?? 1}/2）そろったら対決開始！`
-                      : "ピンを置いたら下のボタンで確定。相手には見えません"
+                      : "エリア内から選んでピンを確定。相手には見えません"
                     : isRunner
-                    ? "ピンを置いたら下のボタンで確定。追手には見えません"
+                    ? "エリア内から選んでピンを確定。追手には見えません"
                     : "決まると捜索が始まります"}
                 </span>
               </div>
@@ -1223,10 +1221,7 @@ export default function App() {
             <MapView
               onPick={(lat, lng) => {
                 if (isRunner && state?.phase === "live") {
-                  if ((state.searchJumpsLeft ?? 0) <= 0) {
-                    showToast("地図ジャンプは使い切りました。映像内の移動で逃げましょう");
-                    return;
-                  }
+                  // 逃走者のピン=次の移動先。間隔ごとに1回、2.5km以内で少しずつ動ける
                   setGuessPin({ lat, lng });
                   setExplorePin(null);
                   return;
@@ -1333,6 +1328,12 @@ export default function App() {
               </strong>
               {!result.correct && !waitingOthers && state?.mode === "chase" && result.distanceKm !== null && (
                 <span className="result-sub">誤差 {formatDistance(result.distanceKm)}</span>
+              )}
+              {!result.correct && state?.mode === "duel" && (
+                <span className="result-sub">
+                  {result.distanceKm !== null ? `誤差 ${formatDistance(result.distanceKm)}` : ""}
+                  {typeof result.attemptsLeft === "number" ? `・残り回答 ${result.attemptsLeft}回` : ""}
+                </span>
               )}
             </div>
           )}
@@ -1486,16 +1487,20 @@ export default function App() {
                 <p className="note">
                   <strong>Search &amp; Chase</strong>（2人以上）: 逃走者がまず地図で隠れ場所を選び、
                   以後はストリートビューの中を自由に下見しながら、設定した間隔ごとに
-                  「いま見ている場所」へ実際に移動できます（1回2.5kmまで）。追手は映像から現在地を特定。
-                  隠れ場所は360°が優先されますが、車から撮影した平面写真の道も選べます。行き止まりに入っても、地図をタップして近くの道へ「ジャンプ」できます（1ラウンド2回まで）。
+                  「いま見ている映像の場所」へ移動できます（1回2.5kmまで）。地図をタップして
+                  近くの道を指定する移動も同条件で可能。行き止まりでも詰みません。
+                  追手は映像から現在地を特定。逃走者の得点は「最も近づかれた距離」で決まり、
+                  1km以上離しきれば満点です（追手の人数や談合に影響されません）。
+                  間隔×2の時間動かないと「潜伏中」と追手に伝わります。ヒントは使えません。
                   逃走者の得点は「追手の平均点が低いほど」高くなります。ヒントは使えません。
                 </p>
                 <p className="note">
                   <strong>対決</strong>（2人専用）: お互いに地図で隠れ場所を出し合い、相手が選んだ場所の
                   ストリートビューだけを頼りに<strong>先に見つけた方の勝ち</strong>。
-                  回答は何度でもでき、外すたびに距離と方角のヒントが出ます。
-                  0.5km以内で発見なら即勝利(+1500)。時間切れ（制限なしは10分扱い）のときは
-                  最も近づけた方の勝ち(+800)。
+                  隠し場所は<strong>選択エリア（県・地方・国）の中</strong>に限定され、条件は対等。
+                  回答は<strong>1人5回まで</strong>で、外すたびに距離・方角と残り回数が出ます。
+                  0.5km以内で発見なら即勝利(+1500)。時間切れ（制限なしは10分扱い）は最接近記録の勝負(+800)。
+                  片方しか回答していない場合は10km以内の記録がないと引き分けです。
                 </p>
                 <p className="note">設定を変えたら上の「スタート」でやり直します。</p>
 

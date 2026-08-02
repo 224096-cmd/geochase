@@ -120,6 +120,12 @@ export function useGameRoom({ roomId, playerName, onResult, onCaught, onNotice, 
         handlers.current.onCaught(msg.playerName, msg.score);
       } else if (msg.type === "notice") {
         handlers.current.onNotice(msg.message);
+      } else if (msg.type === "runner_pos") {
+        handlers.current.onRunnerPos?.(msg.position);
+      } else if (msg.type === "placed") {
+        handlers.current.onPlaced?.();
+      } else if (msg.type === "duel_puzzle") {
+        handlers.current.onDuelPuzzle?.(msg);
       }
     };
 
